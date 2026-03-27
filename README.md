@@ -147,6 +147,32 @@ Employer Share (Recorded in Finance, NOT in salary):
   - EC (Employees' Compensation)
 ```
 
+## 🚀 Deploy to Vercel
+
+Deploy this HRIS to the cloud for free using Vercel.
+
+### Quick Deployment Checklist
+
+1. **Push code to GitHub** — Create a repo and push your code
+2. **Create accounts** — [Vercel](https://vercel.com/signup) (free) + [Neon](https://neon.tech) (free PostgreSQL)
+3. **Import project on Vercel** — Go to [vercel.com/new](https://vercel.com/new), import your repo
+4. **Set environment variables** in Vercel:
+   - `DATABASE_URL` — Your Neon/Vercel Postgres connection string
+   - `NEXTAUTH_SECRET` — Run `openssl rand -base64 32` to generate
+   - `NEXTAUTH_URL` — `https://your-project.vercel.app`
+5. **Deploy** — Click Deploy and wait ~3 minutes
+6. **Set up database** — Run locally with your production DATABASE_URL:
+   ```bash
+   npx prisma db push
+   npx prisma db seed
+   ```
+7. **Log in** — Use default credentials (admin@hris.local / admin123)
+8. **Change passwords** immediately!
+
+> 📖 **Full deployment guide:** See [DEPLOYMENT.md](./DEPLOYMENT.md) for detailed step-by-step instructions, database provider options, and troubleshooting tips.
+
+---
+
 ## Tech Stack
 
 - **Frontend:** Next.js 14, React 18, Tailwind CSS, shadcn/ui
