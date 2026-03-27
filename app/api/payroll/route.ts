@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth-options';
 import { prisma } from '@/lib/db';
-import { calculateSSS, calculatePhilHealth, calculatePagIbig } from '@/lib/payroll-utils';
+import { calculateSSS, calculatePhilHealth, calculatePagIbig, calculateWithholdingTax } from '@/lib/payroll-utils';
 
 // GET payrolls
 export async function GET(request: NextRequest) {
@@ -17,37 +17,26 @@ export async function GET(request: NextRequest) {
     const employeeId = searchParams.get('employeeId');
 
     const where: any = {};
-    if (periodId) {
-      where.payrollPeriodId = periodId;
-    }
-    if (employeeId) {
-      where.employeeId = employeeId;
-    }
+    if (periodId) where.payrollPeriodId = periodId;
+    if (employeeId) where.employeeId = employeeId;
 
-    // Non-admin/HR users can only see their own payrolls
     const role = (session.user as any).role;
-    if (!['ADMIN', 'HR'].includes(role)) {
+    if (!['ADMIN', 'HR', 'FINANCE'].includes(role)) {
       const userEmployeeId = (session.user as any).employeeId;
-      if (userEmployeeId) {
-        where.employeeId = userEmployeeId;
-      }
+      if (userEmployeeId) where.employeeId = userEmployeeId;
     }
 
     const payrolls = await prisma.payroll.findMany({
       where,
-      include: {
-        payrollPeriod: true,
-      },
+      include: { payrollPeriod: true },
       orderBy: { createdAt: 'desc' },
     });
 
-    // Fetch employee details
     const employeeIds = [...new Set(payrolls.map(p => p.employeeId))];
     const employees = await prisma.employee.findMany({
       where: { id: { in: employeeIds } },
       include: { department: true },
     });
-
     const employeeMap = new Map(employees.map(e => [e.id, e]));
 
     const result = payrolls.map(p => ({
@@ -73,25 +62,32 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const { periodId } = body;
 
-    // Get the payroll period
     const period = await prisma.payrollPeriod.findUnique({ where: { id: periodId } });
     if (!period) {
       return NextResponse.json({ error: 'Payroll period not found' }, { status: 404 });
     }
 
-    // Check if attendance is locked before generating payroll
     if (!period.isLocked) {
-      return NextResponse.json({ 
-        error: 'Attendance must be locked before generating payroll. Please lock attendance first.' 
+      return NextResponse.json({
+        error: 'Attendance must be locked before generating payroll. Please lock attendance first.'
       }, { status: 400 });
     }
 
-    // Get all active employees
-    const employees = await prisma.employee.findMany({
-      where: { isActive: true },
-    });
+    const employees = await prisma.employee.findMany({ where: { isActive: true } });
 
     const isFirstHalf = period.periodType === 'FIRST_HALF';
+    const isSemiMonthly = ['FIRST_HALF', 'SECOND_HALF'].includes(period.periodType);
+    const isMonthly = period.periodType === 'MONTHLY';
+    const isBiWeekly = period.periodType === 'BI_WEEKLY';
+
+    // Determine pay divisor for splitting monthly contributions
+    let payDivisor = 2; // semi-monthly
+    if (isMonthly) payDivisor = 1;
+
+    // Determine withholding tax period
+    let wtPeriod: 'SEMI_MONTHLY' | 'MONTHLY' = 'SEMI_MONTHLY';
+    if (isMonthly) wtPeriod = 'MONTHLY';
+
     const payrolls = [];
 
     for (const employee of employees) {
@@ -99,14 +95,10 @@ export async function POST(request: NextRequest) {
       const attendances = await prisma.attendance.findMany({
         where: {
           employeeId: employee.id,
-          date: {
-            gte: period.startDate,
-            lte: period.endDate,
-          },
+          date: { gte: period.startDate, lte: period.endDate },
         },
       });
 
-      // Calculate totals from attendance
       let totalHours = 0;
       let overtimeMinutes = 0;
       let nightDiffMinutes = 0;
@@ -131,10 +123,7 @@ export async function POST(request: NextRequest) {
           employeeId: employee.id,
           isActive: true,
           effectiveFrom: { lte: period.endDate },
-          OR: [
-            { effectiveTo: null },
-            { effectiveTo: { gte: period.startDate } },
-          ],
+          OR: [{ effectiveTo: null }, { effectiveTo: { gte: period.startDate } }],
         },
         include: { allowanceType: true },
       });
@@ -144,9 +133,9 @@ export async function POST(request: NextRequest) {
       let otherAllowances = 0;
 
       for (const allowance of allowances) {
-        const amount = allowance.frequency === 'MONTHLY' ? allowance.amount / 2 : allowance.amount;
-        if (allowance.allowanceType.name.toLowerCase().includes('mobile') || 
-            allowance.allowanceType.name.toLowerCase().includes('load')) {
+        const amount = allowance.frequency === 'MONTHLY' ? allowance.amount / payDivisor : allowance.amount;
+        if (allowance.allowanceType.name.toLowerCase().includes('mobile') ||
+          allowance.allowanceType.name.toLowerCase().includes('load')) {
           mobileAllowance += amount;
         } else if (allowance.allowanceType.name.toLowerCase().includes('performance')) {
           performancePay += amount;
@@ -155,39 +144,38 @@ export async function POST(request: NextRequest) {
         }
       }
 
-      // Get ALL active payroll adjustments for this employee
-      // Adjustments with payrollCutoff format: "YYYY-MM-DD_YYYY-MM-DD"
-      // Match: no cutoff (applies to all), or cutoff overlaps with period dates
+      // Get payroll adjustments
       const allAdjustments = await prisma.payrollAdjustment.findMany({
-        where: {
-          employeeId: employee.id,
-          isActive: true,
-        },
+        where: { employeeId: employee.id, isActive: true },
       });
 
       let adjustmentTotal = 0;
+      let bonusPay = 0;
       const periodStart = period.startDate.getTime();
       const periodEnd = period.endDate.getTime();
 
       for (const adj of allAdjustments) {
+        let applies = false;
         if (!adj.payrollCutoff || adj.payrollCutoff.trim() === '') {
-          // No specific cutoff → applies to any period
-          adjustmentTotal += adj.amount;
+          applies = true;
         } else {
-          // Parse cutoff: "YYYY-MM-DD_YYYY-MM-DD"
           const parts = adj.payrollCutoff.split('_');
           if (parts.length === 2) {
             const adjStart = new Date(parts[0]).getTime();
             const adjEnd = new Date(parts[1]).getTime();
-            // Check overlap: adjustment range overlaps with period range
-            if (adjStart <= periodEnd && adjEnd >= periodStart) {
-              adjustmentTotal += adj.amount;
-            }
+            if (adjStart <= periodEnd && adjEnd >= periodStart) applies = true;
+          }
+        }
+        if (applies) {
+          if (adj.adjustmentType === 'BONUS') {
+            bonusPay += adj.amount;
+          } else {
+            adjustmentTotal += adj.amount;
           }
         }
       }
 
-      // Get active loans for deduction (must be isActive AND status APPROVED/ACTIVE)
+      // Get active loans for deduction
       const loans = await prisma.employeeLoan.findMany({
         where: {
           employeeId: employee.id,
@@ -203,108 +191,76 @@ export async function POST(request: NextRequest) {
       let otherLoanDeductions = 0;
 
       for (const loan of loans) {
-        const deduction = loan.monthlyDeduction / 2; // Semi-monthly
+        const deduction = loan.monthlyDeduction / payDivisor;
         if (loan.loanType.name.toLowerCase().includes('salary')) {
           salaryLoanDeduction += deduction;
-        } else if (loan.loanType.name.toLowerCase().includes('computer') || 
-                   loan.loanType.name.toLowerCase().includes('laptop')) {
+        } else if (loan.loanType.name.toLowerCase().includes('computer') ||
+          loan.loanType.name.toLowerCase().includes('laptop')) {
           computerLoanDeduction += deduction;
         } else {
           otherLoanDeductions += deduction;
         }
       }
 
-      // Use employee's actual basic salary from employee record
       const basicMonthlySalary = employee.basicSalary || 0;
       const workDaysPerMonth = 22;
       const dailyRate = basicMonthlySalary / workDaysPerMonth;
       const hourlyRate = dailyRate / 8;
-
-      // Calculate basic pay - FIXED semi-monthly basic salary (half of monthly)
       const daysWorked = totalHours / 8;
-      const basicPay = basicMonthlySalary / 2; // Fixed semi-monthly basic
+      const basicPay = basicMonthlySalary / payDivisor;
 
-      // Calculate overtime pay (125%)
+      // Calculate overtime
       const overtimePay = (overtimeMinutes / 60) * hourlyRate * 1.25;
 
       // Calculate holiday pay
       let holidayPay = 0;
       if (holidayType === 'REGULAR') {
-        holidayPay = (holidayHours / 8) * dailyRate; // Additional 100% for regular holiday
+        holidayPay = (holidayHours / 8) * dailyRate;
       } else if (holidayType === 'SPECIAL') {
-        holidayPay = (holidayHours / 8) * dailyRate * 0.3; // Additional 30% for special
+        holidayPay = (holidayHours / 8) * dailyRate * 0.3;
       }
 
-      // Calculate night differential (10%)
+      // Calculate night differential
       const nightDiffPay = ((nightDiffMinutes + nightDiffOTMinutes) / 60) * hourlyRate * 0.10;
 
-      // Total Gross Pay = Basic Pay + Allowances + OT/Holiday/NightDiff (NO adjustments, NO employer share)
+      // Gross Earnings = Basic Pay + All Allowances + OT/Holiday/Night Diff + Bonus
       const grossEarnings = basicPay + overtimePay + holidayPay + nightDiffPay +
-                           mobileAllowance + performancePay + otherAllowances;
+        bonusPay + mobileAllowance + performancePay + otherAllowances;
 
-      // Monthly gross for employer contribution basis = actual total gross of BOTH cutoffs in the month
-      let monthlyGross = grossEarnings * 2; // default fallback: double current half
-      if (!isFirstHalf) {
-        // Look up actual 1st half payroll for the same employee, month, year
-        const firstHalfPeriod = await prisma.payrollPeriod.findUnique({
-          where: { periodType_month_year: { periodType: 'FIRST_HALF', month: period.month, year: period.year } },
-        });
-        if (firstHalfPeriod) {
-          const firstHalfPayroll = await prisma.payroll.findUnique({
-            where: { payrollPeriodId_employeeId: { payrollPeriodId: firstHalfPeriod.id, employeeId: employee.id } },
-          });
-          if (firstHalfPayroll) {
-            monthlyGross = firstHalfPayroll.grossEarnings + grossEarnings;
-          }
-        }
-      } else {
-        // For 1st half, check if 2nd half already exists (re-generation scenario)
-        const secondHalfPeriod = await prisma.payrollPeriod.findUnique({
-          where: { periodType_month_year: { periodType: 'SECOND_HALF', month: period.month, year: period.year } },
-        });
-        if (secondHalfPeriod) {
-          const secondHalfPayroll = await prisma.payroll.findUnique({
-            where: { payrollPeriodId_employeeId: { payrollPeriodId: secondHalfPeriod.id, employeeId: employee.id } },
-          });
-          if (secondHalfPayroll) {
-            monthlyGross = grossEarnings + secondHalfPayroll.grossEarnings;
-          }
-        }
-      }
+      // Monthly gross for contribution basis
+      const monthlyGross = grossEarnings * payDivisor;
 
-      // Government contributions calculation (based on actual monthly gross of both cutoffs)
+      // Government contributions (monthly)
       const sss = calculateSSS(monthlyGross);
       const philHealth = calculatePhilHealth(monthlyGross);
       const pagIbig = calculatePagIbig(monthlyGross);
 
-      // NO employee deductions - company handles all contributions
-      const sssContribution = 0;
-      const philHealthContribution = 0;
-      const pagIbigContribution = 0;
-      
-      // Employer share - added on 2nd cutoff ONLY
-      let employerSSS = 0;
-      let employerPhilHealth = 0;
-      let employerPagIbig = 0;
+      // Employee share per period - DEDUCTED from salary
+      const sssContribution = Math.round(sss.employee / payDivisor * 100) / 100;
+      const philHealthContribution = Math.round(philHealth.employee / payDivisor * 100) / 100;
+      const pagIbigContribution = Math.round(pagIbig.employee / payDivisor * 100) / 100;
 
-      if (!isFirstHalf) {
-        employerSSS = sss.employer;
-        employerPhilHealth = philHealth.employer;
-        employerPagIbig = pagIbig.employer;
-      }
+      // Employer share per period - recorded in Finance, NOT added to salary
+      const employerSSS = Math.round(sss.employer / payDivisor * 100) / 100;
+      const employerPhilHealth = Math.round(philHealth.employer / payDivisor * 100) / 100;
+      const employerPagIbig = Math.round(pagIbig.employer / payDivisor * 100) / 100;
+      const employerEC = Math.round(sss.employerEC / payDivisor * 100) / 100;
 
-      // Deductions (loans only - no government deductions since company shoulders them)
-      const withholdingTax = 0;
+      // Taxable income = Gross - Employee mandatory contributions
+      const taxableIncome = grossEarnings - sssContribution - philHealthContribution - pagIbigContribution;
+
+      // Withholding tax
+      const withholdingTax = calculateWithholdingTax(taxableIncome, wtPeriod);
+
+      // Total deductions = Employee contributions + Withholding Tax + Loans + Others
       const totalDeductions = sssContribution + philHealthContribution + pagIbigContribution +
-                             salaryLoanDeduction + computerLoanDeduction +
-                             otherLoanDeductions;
+        withholdingTax +
+        salaryLoanDeduction + computerLoanDeduction + otherLoanDeductions;
 
-      // Net Pay = Total Gross + Adjustments + Employer Share - Deductions
-      const netPay = grossEarnings + adjustmentTotal +
-                     employerSSS + employerPhilHealth + employerPagIbig -
-                     totalDeductions;
+      // Net Pay = Gross Earnings + Adjustments - Total Deductions
+      // NOTE: Employer share is NOT added to net pay
+      const netPay = grossEarnings + adjustmentTotal - totalDeductions;
 
-      // Create or update payroll record
       const payroll = await prisma.payroll.upsert({
         where: {
           payrollPeriodId_employeeId: {
@@ -322,6 +278,7 @@ export async function POST(request: NextRequest) {
           overtimePay,
           holidayPay,
           nightDiffPay,
+          bonusPay,
           mobileAllowance,
           performancePay,
           otherAllowances,
@@ -329,10 +286,12 @@ export async function POST(request: NextRequest) {
           employerSSS,
           employerPhilHealth,
           employerPagIbig,
+          employerEC,
           sssContribution,
           philHealthContribution,
           pagIbigContribution,
           withholdingTax,
+          taxableIncome,
           salaryLoanDeduction,
           computerLoanDeduction,
           otherLoanDeductions,
@@ -353,6 +312,7 @@ export async function POST(request: NextRequest) {
           overtimePay,
           holidayPay,
           nightDiffPay,
+          bonusPay,
           mobileAllowance,
           performancePay,
           otherAllowances,
@@ -360,10 +320,12 @@ export async function POST(request: NextRequest) {
           employerSSS,
           employerPhilHealth,
           employerPagIbig,
+          employerEC,
           sssContribution,
           philHealthContribution,
           pagIbigContribution,
           withholdingTax,
+          taxableIncome,
           salaryLoanDeduction,
           computerLoanDeduction,
           otherLoanDeductions,
@@ -377,7 +339,6 @@ export async function POST(request: NextRequest) {
       payrolls.push(payroll);
     }
 
-    // Update period status
     await prisma.payrollPeriod.update({
       where: { id: periodId },
       data: { status: 'PROCESSING', processedAt: new Date() },
@@ -401,7 +362,6 @@ export async function PUT(request: NextRequest) {
     const body = await request.json();
     const { id, ...updateData } = body;
 
-    // Recalculate totals if earnings/deductions changed
     const payroll = await prisma.payroll.findUnique({ where: { id } });
     if (!payroll) {
       return NextResponse.json({ error: 'Payroll not found' }, { status: 404 });
@@ -409,21 +369,19 @@ export async function PUT(request: NextRequest) {
 
     const merged = { ...payroll, ...updateData };
 
-    // Total Gross = Basic + Allowances + OT/Holiday/NightDiff (NO adjustments, NO employer share)
-    const grossEarnings = 
+    const grossEarnings =
       merged.basicPay + merged.overtimePay + merged.holidayPay + merged.nightDiffPay +
-      merged.restDayPay + merged.mobileAllowance + merged.performancePay + 
+      merged.restDayPay + (merged.bonusPay || 0) + merged.mobileAllowance + merged.performancePay +
       merged.otherAllowances;
 
-    const totalDeductions = 
+    const totalDeductions =
       merged.sssContribution + merged.philHealthContribution + merged.pagIbigContribution +
+      merged.withholdingTax +
       merged.salaryLoanDeduction + merged.computerLoanDeduction +
-      merged.otherLoanDeductions + merged.otherDeductions;
+      merged.otherLoanDeductions + (merged.advancesDeduction || 0) + merged.otherDeductions;
 
-    // Net Pay = Total Gross + Adjustments + Employer Share - Deductions
-    const netPay = grossEarnings + (merged.adjustmentTotal || 0) +
-      merged.employerSSS + merged.employerPhilHealth + merged.employerPagIbig -
-      totalDeductions;
+    // Net Pay = Gross + Adjustments - Deductions (employer share NOT included)
+    const netPay = grossEarnings + (merged.adjustmentTotal || 0) - totalDeductions;
 
     const updated = await prisma.payroll.update({
       where: { id },

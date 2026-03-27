@@ -306,7 +306,13 @@ export default function PayrollPage() {
   const formatPeriodLabel = (period: PayrollPeriod) => {
     const cutoff1Label = `${cutoffSettings.cutoff1Start}-${cutoffSettings.cutoff1End}`;
     const cutoff2Label = `${cutoffSettings.cutoff2Start}-${cutoffSettings.cutoff2End}`;
-    return `${MONTHS[period.month - 1]} ${period.year} - ${period.periodType === 'FIRST_HALF' ? `1st Cutoff (${cutoff1Label})` : `2nd Cutoff (${cutoff2Label})`}`;
+    const typeLabels: Record<string, string> = {
+      'FIRST_HALF': `1st Cutoff (${cutoff1Label})`,
+      'SECOND_HALF': `2nd Cutoff (${cutoff2Label})`,
+      'MONTHLY': 'Monthly',
+      'BI_WEEKLY': 'Bi-Weekly',
+    };
+    return `${MONTHS[period.month - 1]} ${period.year} - ${typeLabels[period.periodType] || period.periodType}`;
   };
 
   if (loading) {
@@ -729,8 +735,10 @@ export default function PayrollPage() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="FIRST_HALF">1st Cutoff ({cutoffSettings.cutoff1Start}th - {cutoffSettings.cutoff1End}th)</SelectItem>
-                  <SelectItem value="SECOND_HALF">2nd Cutoff ({cutoffSettings.cutoff2Start}th - {cutoffSettings.cutoff2End}th)</SelectItem>
+                  <SelectItem value="FIRST_HALF">Semi-Monthly: 1st Cutoff ({cutoffSettings.cutoff1Start}th - {cutoffSettings.cutoff1End}th)</SelectItem>
+                  <SelectItem value="SECOND_HALF">Semi-Monthly: 2nd Cutoff ({cutoffSettings.cutoff2Start}th - {cutoffSettings.cutoff2End}th)</SelectItem>
+                  <SelectItem value="MONTHLY">Monthly (1st - End of Month)</SelectItem>
+                  <SelectItem value="BI_WEEKLY">Bi-Weekly (14 days)</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -810,56 +818,63 @@ export default function PayrollPage() {
                 </Card>
               )}
 
-              {/* Employer Share */}
+              {/* Employee Deductions (Mandatory Contributions) */}
+              <Card>
+                <CardHeader className="py-3">
+                  <CardTitle className="text-sm">Employee Contributions (Deducted from Salary)</CardTitle>
+                </CardHeader>
+                <CardContent className="py-2">
+                  <div className="grid grid-cols-2 gap-2 text-sm">
+                    <span>SSS (Employee Share)</span>
+                    <span className="text-right text-red-600">{formatCurrency(selectedPayroll.sssContribution)}</span>
+                    <span>PhilHealth (Employee Share)</span>
+                    <span className="text-right text-red-600">{formatCurrency(selectedPayroll.philHealthContribution)}</span>
+                    <span>Pag-IBIG (Employee Share)</span>
+                    <span className="text-right text-red-600">{formatCurrency(selectedPayroll.pagIbigContribution)}</span>
+                    <span>Withholding Tax</span>
+                    <span className="text-right text-red-600">{formatCurrency(selectedPayroll.withholdingTax || 0)}</span>
+                    {selectedPayroll.salaryLoanDeduction > 0 && (<>
+                      <span>Salary Loan</span>
+                      <span className="text-right text-red-600">{formatCurrency(selectedPayroll.salaryLoanDeduction)}</span>
+                    </>)}
+                    {selectedPayroll.computerLoanDeduction > 0 && (<>
+                      <span>Computer Loan</span>
+                      <span className="text-right text-red-600">{formatCurrency(selectedPayroll.computerLoanDeduction)}</span>
+                    </>)}
+                    {selectedPayroll.otherLoanDeductions > 0 && (<>
+                      <span>Other Loans</span>
+                      <span className="text-right text-red-600">{formatCurrency(selectedPayroll.otherLoanDeductions)}</span>
+                    </>)}
+                    {selectedPayroll.otherDeductions > 0 && (<>
+                      <span>Other Deductions</span>
+                      <span className="text-right text-red-600">{formatCurrency(selectedPayroll.otherDeductions)}</span>
+                    </>)}
+                    <span className="font-bold border-t pt-2">Total Deductions</span>
+                    <span className="text-right font-bold text-red-600 border-t pt-2">{formatCurrency(selectedPayroll.totalDeductions)}</span>
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* Employer Share (NOT deducted from salary) */}
               {(selectedPayroll.employerSSS + selectedPayroll.employerPhilHealth + selectedPayroll.employerPagIbig) > 0 && (
-                <Card>
+                <Card className="border-orange-200 bg-orange-50/30">
                   <CardHeader className="py-3">
-                    <CardTitle className="text-sm">Employer Share</CardTitle>
+                    <CardTitle className="text-sm">Employer Share (Company Expense — NOT deducted from salary)</CardTitle>
                   </CardHeader>
                   <CardContent className="py-2">
                     <div className="grid grid-cols-2 gap-2 text-sm">
-                      <span>Employer SSS</span>
-                      <span className="text-right text-green-600">{formatCurrency(selectedPayroll.employerSSS)}</span>
-                      <span>Employer PhilHealth</span>
-                      <span className="text-right text-green-600">{formatCurrency(selectedPayroll.employerPhilHealth)}</span>
-                      <span>Employer Pag-IBIG</span>
-                      <span className="text-right text-green-600">{formatCurrency(selectedPayroll.employerPagIbig)}</span>
+                      <span>SSS (Employer)</span>
+                      <span className="text-right text-orange-600">{formatCurrency(selectedPayroll.employerSSS)}</span>
+                      <span>PhilHealth (Employer)</span>
+                      <span className="text-right text-orange-600">{formatCurrency(selectedPayroll.employerPhilHealth)}</span>
+                      <span>Pag-IBIG (Employer)</span>
+                      <span className="text-right text-orange-600">{formatCurrency(selectedPayroll.employerPagIbig)}</span>
                       <span className="font-bold border-t pt-2">Total Employer Share</span>
-                      <span className="text-right font-bold text-green-600 border-t pt-2">
+                      <span className="text-right font-bold text-orange-600 border-t pt-2">
                         {formatCurrency(selectedPayroll.employerSSS + selectedPayroll.employerPhilHealth + selectedPayroll.employerPagIbig)}
                       </span>
                     </div>
-                  </CardContent>
-                </Card>
-              )}
-
-              {/* Deductions */}
-              {selectedPayroll.totalDeductions > 0 && (
-                <Card>
-                  <CardHeader className="py-3">
-                    <CardTitle className="text-sm">Deductions</CardTitle>
-                  </CardHeader>
-                  <CardContent className="py-2">
-                    <div className="grid grid-cols-2 gap-2 text-sm">
-                      {selectedPayroll.salaryLoanDeduction > 0 && (<>
-                        <span>Salary Loan</span>
-                        <span className="text-right text-red-600">{formatCurrency(selectedPayroll.salaryLoanDeduction)}</span>
-                      </>)}
-                      {selectedPayroll.computerLoanDeduction > 0 && (<>
-                        <span>Computer Loan</span>
-                        <span className="text-right text-red-600">{formatCurrency(selectedPayroll.computerLoanDeduction)}</span>
-                      </>)}
-                      {selectedPayroll.otherLoanDeductions > 0 && (<>
-                        <span>Other Loans</span>
-                        <span className="text-right text-red-600">{formatCurrency(selectedPayroll.otherLoanDeductions)}</span>
-                      </>)}
-                      {selectedPayroll.otherDeductions > 0 && (<>
-                        <span>Other Deductions</span>
-                        <span className="text-right text-red-600">{formatCurrency(selectedPayroll.otherDeductions)}</span>
-                      </>)}
-                      <span className="font-bold border-t pt-2">Total Deductions</span>
-                      <span className="text-right font-bold text-red-600 border-t pt-2">{formatCurrency(selectedPayroll.totalDeductions)}</span>
-                    </div>
+                    <p className="text-xs text-orange-600 mt-2">Recorded in Finance module as company expense</p>
                   </CardContent>
                 </Card>
               )}
@@ -873,7 +888,7 @@ export default function PayrollPage() {
                   </span>
                 </div>
                 <p className="text-xs text-muted-foreground mt-1">
-                  Total Gross + Adjustments + Employer Share - Deductions
+                  Gross Earnings + Adjustments − Employee Contributions − Withholding Tax − Loans
                 </p>
               </div>
             </div>

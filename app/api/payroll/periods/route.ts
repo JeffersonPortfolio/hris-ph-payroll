@@ -87,21 +87,39 @@ export async function POST(request: NextRequest) {
 
     if (periodType === 'FIRST_HALF') {
       // First cutoff: e.g., 27th of previous month to 10th of current month
-      // Pay date: 15th of current month
       const prevMonth = m === 1 ? 12 : m - 1;
       const prevYear = m === 1 ? y - 1 : y;
       startDate = new Date(prevYear, prevMonth - 1, cutoff1Start);
       endDate = new Date(y, m - 1, cutoff1End);
       cutoffDate = new Date(y, m - 1, cutoff1End);
       payDate = new Date(y, m - 1, 15);
-    } else {
+    } else if (periodType === 'SECOND_HALF') {
       // Second cutoff: e.g., 11th to 25th of current month
-      // Pay date: end of month (30th or last day)
       startDate = new Date(y, m - 1, cutoff2Start);
       endDate = new Date(y, m - 1, cutoff2End);
       cutoffDate = new Date(y, m - 1, cutoff2End);
       const lastDay = new Date(y, m, 0).getDate();
       payDate = new Date(y, m - 1, Math.min(30, lastDay));
+    } else if (periodType === 'MONTHLY') {
+      // Full month: 1st to last day
+      startDate = new Date(y, m - 1, 1);
+      const lastDay = new Date(y, m, 0).getDate();
+      endDate = new Date(y, m - 1, lastDay);
+      cutoffDate = new Date(y, m - 1, lastDay);
+      payDate = new Date(y, m - 1, Math.min(30, lastDay));
+    } else if (periodType === 'BI_WEEKLY') {
+      // Bi-weekly: using the provided start date from body, or default to 1st-14th
+      const biWeekStart = body.startDay ? parseInt(body.startDay) : 1;
+      startDate = new Date(y, m - 1, biWeekStart);
+      endDate = new Date(y, m - 1, biWeekStart + 13);
+      cutoffDate = new Date(y, m - 1, biWeekStart + 13);
+      payDate = new Date(y, m - 1, biWeekStart + 14);
+    } else {
+      // Default fallback
+      startDate = new Date(y, m - 1, 1);
+      endDate = new Date(y, m - 1, 15);
+      cutoffDate = new Date(y, m - 1, 15);
+      payDate = new Date(y, m - 1, 20);
     }
 
     const period = await prisma.payrollPeriod.create({

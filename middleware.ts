@@ -22,6 +22,22 @@ export default withAuth(
       }
     }
 
+    // Finance routes - accessible by ADMIN, HR, FINANCE
+    const financeRoutes = ["/finance"];
+    if (financeRoutes.some((route) => path.startsWith(route))) {
+      if (!["ADMIN", "HR", "FINANCE"].includes(token?.role as string)) {
+        return NextResponse.redirect(new URL("/dashboard", req.url));
+      }
+    }
+
+    // Payroll routes - accessible by ADMIN, HR
+    const payrollRoutes = ["/payroll", "/allowances", "/adjustments", "/loans"];
+    if (payrollRoutes.some((route) => path.startsWith(route))) {
+      if (!["ADMIN", "HR"].includes(token?.role as string)) {
+        return NextResponse.redirect(new URL("/dashboard", req.url));
+      }
+    }
+
     return NextResponse.next();
   },
   {
@@ -44,5 +60,14 @@ export const config = {
     "/users/:path*",
     "/profile/:path*",
     "/notifications/:path*",
+    "/finance/:path*",
+    "/payroll/:path*",
+    "/allowances/:path*",
+    "/adjustments/:path*",
+    "/loans/:path*",
+    "/payslip/:path*",
+    "/work-schedules/:path*",
+    "/holidays/:path*",
+    "/office-locations/:path*",
   ],
 };

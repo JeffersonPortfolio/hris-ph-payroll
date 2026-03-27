@@ -92,7 +92,17 @@ const menuStructure: MenuEntry[] = [
     ],
   },
 
-  // 4. Settings
+  // 4. Finance
+  {
+    label: "Finance",
+    icon: Receipt,
+    roles: ["ADMIN", "HR", "FINANCE"],
+    items: [
+      { icon: Receipt, label: "Finance Dashboard", href: "/finance", roles: ["ADMIN", "HR", "FINANCE"] },
+    ],
+  },
+
+  // 5. Settings
   {
     label: "Settings",
     icon: Settings,

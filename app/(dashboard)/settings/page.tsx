@@ -130,6 +130,7 @@ export default function SettingsPage() {
     cutoff1End: '10',
     cutoff2Start: '11',
     cutoff2End: '25',
+    payrollPeriodMode: 'SEMI_MONTHLY',
   });
   const [savingPayroll, setSavingPayroll] = useState(false);
 
@@ -167,6 +168,7 @@ export default function SettingsPage() {
           cutoff1End: settingsData.payroll_cutoff_1_end || '10',
           cutoff2Start: settingsData.payroll_cutoff_2_start || '11',
           cutoff2End: settingsData.payroll_cutoff_2_end || '25',
+          payrollPeriodMode: settingsData.payroll_period_mode || 'SEMI_MONTHLY',
         });
       }
     } catch (error) {
@@ -309,6 +311,7 @@ export default function SettingsPage() {
             payroll_cutoff_1_end: payrollSettings.cutoff1End,
             payroll_cutoff_2_start: payrollSettings.cutoff2Start,
             payroll_cutoff_2_end: payrollSettings.cutoff2End,
+            payroll_period_mode: payrollSettings.payrollPeriodMode,
           }
         }),
       });
@@ -827,7 +830,7 @@ export default function SettingsPage() {
                 Payroll Cutoff Dates
               </CardTitle>
               <CardDescription>
-                Configure payroll period cutoff dates for salary computation
+                Configure payroll period mode and cutoff dates for salary computation
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
@@ -837,6 +840,25 @@ export default function SettingsPage() {
                   Cutoff dates determine which days of work are included in each payroll period.
                   For semi-monthly payroll, there are two cutoff periods per month.
                 </p>
+              </div>
+
+              {/* Payroll Period Mode */}
+              <div className="border rounded-lg p-4 space-y-3">
+                <h4 className="font-semibold text-gray-900">Payroll Period Mode</h4>
+                <Select
+                  value={payrollSettings.payrollPeriodMode}
+                  onValueChange={(value) => setPayrollSettings({ ...payrollSettings, payrollPeriodMode: value })}
+                >
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="SEMI_MONTHLY">Semi-Monthly (2x per month)</SelectItem>
+                    <SelectItem value="MONTHLY">Monthly (1x per month)</SelectItem>
+                    <SelectItem value="BI_WEEKLY">Bi-Weekly (Every 2 weeks)</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-sm text-gray-500">Determines how contributions and withholding tax are calculated per period.</p>
               </div>
 
               <div className="grid md:grid-cols-2 gap-6">

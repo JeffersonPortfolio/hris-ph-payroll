@@ -1,7 +1,7 @@
 generator client {
     provider = "prisma-client-js"
     binaryTargets = ["native", "linux-musl-arm64-openssl-3.0.x"]
-    output = "/home/ubuntu/hris_system/nextjs_space/node_modules/.prisma/client"
+    output = "/home/ubuntu/hris_ph_payroll/node_modules/.prisma/client"
 }
 
 datasource db {
@@ -332,25 +332,30 @@ model Payroll {
   holidayPay             Float         @default(0)
   nightDiffPay           Float         @default(0)
   restDayPay             Float         @default(0)
+  bonusPay               Float         @default(0)
   mobileAllowance        Float         @default(0)
   performancePay         Float         @default(0)
   otherAllowances        Float         @default(0)
   employerSSS            Float         @default(0)
   employerPhilHealth     Float         @default(0)
   employerPagIbig        Float         @default(0)
+  employerEC             Float         @default(0)
   sssContribution        Float         @default(0)
   philHealthContribution Float         @default(0)
   pagIbigContribution    Float         @default(0)
   withholdingTax         Float         @default(0)
+  incomeTax              Float         @default(0)
   salaryLoanDeduction    Float         @default(0)
   computerLoanDeduction  Float         @default(0)
   otherLoanDeductions    Float         @default(0)
+  advancesDeduction      Float         @default(0)
   adjustmentTotal        Float         @default(0)
   otherDeductions        Float         @default(0)
   deductionNotes         String?
   grossEarnings          Float         @default(0)
   totalDeductions        Float         @default(0)
   netPay                 Float         @default(0)
+  taxableIncome          Float         @default(0)
   status                 PayrollStatus @default(DRAFT)
   createdAt              DateTime      @default(now())
   updatedAt              DateTime      @updatedAt
@@ -497,6 +502,7 @@ model DepartmentLocation {
 enum UserRole {
   ADMIN
   HR
+  FINANCE
   EMPLOYEE
 }
 
@@ -569,6 +575,8 @@ enum PayrollStatus {
 enum PayrollPeriodType {
   FIRST_HALF
   SECOND_HALF
+  MONTHLY
+  BI_WEEKLY
 }
 
 enum AllowanceFrequency {
