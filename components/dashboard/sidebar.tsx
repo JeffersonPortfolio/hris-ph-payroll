@@ -1,7 +1,7 @@
 "use client";
 
 import { useSession, signOut } from "next-auth/react";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import Link from "next/link";
 import {
   LayoutDashboard,
@@ -27,6 +27,8 @@ import {
   Receipt,
   SlidersHorizontal,
   X,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useState, useEffect } from "react";
@@ -40,6 +42,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { toast } from "@/components/ui/use-toast";
 
 type MenuItem = {
   icon: any;
@@ -62,18 +65,21 @@ function isSection(entry: MenuEntry): entry is MenuSection {
 }
 
 const menuStructure: MenuEntry[] = [
+  // 0. Super Admin
+  { icon: Shield, label: "Super Admin", href: "/super-admin", roles: ["SUPER_ADMIN"] },
+
   // 1. Dashboard
-  { icon: LayoutDashboard, label: "Dashboard", href: "/dashboard", roles: ["ADMIN", "HR", "EMPLOYEE"] },
+  { icon: LayoutDashboard, label: "Dashboard", href: "/dashboard", roles: ["SUPER_ADMIN", "ADMIN", "HR", "EMPLOYEE"] },
 
   // 2. Timekeeping
   {
     label: "Timekeeping",
     icon: Clock,
-    roles: ["ADMIN", "HR", "EMPLOYEE"],
+    roles: ["SUPER_ADMIN", "ADMIN", "HR", "EMPLOYEE"],
     items: [
-      { icon: Clock, label: "Attendance", href: "/attendance", roles: ["ADMIN", "HR", "EMPLOYEE"] },
-      { icon: Calendar, label: "Holidays", href: "/holidays", roles: ["ADMIN", "HR", "EMPLOYEE"] },
-      { icon: CalendarDays, label: "Leaves", href: "/leaves", roles: ["ADMIN", "HR", "EMPLOYEE"] },
+      { icon: Clock, label: "Attendance", href: "/attendance", roles: ["SUPER_ADMIN", "ADMIN", "HR", "EMPLOYEE"] },
+      { icon: Calendar, label: "Holidays", href: "/holidays", roles: ["SUPER_ADMIN", "ADMIN", "HR", "EMPLOYEE"] },
+      { icon: CalendarDays, label: "Leaves", href: "/leaves", roles: ["SUPER_ADMIN", "ADMIN", "HR", "EMPLOYEE"] },
     ],
   },
 
@@ -81,14 +87,14 @@ const menuStructure: MenuEntry[] = [
   {
     label: "Payroll",
     icon: DollarSign,
-    roles: ["ADMIN", "HR", "EMPLOYEE"],
+    roles: ["SUPER_ADMIN", "ADMIN", "HR", "EMPLOYEE"],
     items: [
-      { icon: DollarSign, label: "Payroll", href: "/payroll", roles: ["ADMIN", "HR"] },
+      { icon: DollarSign, label: "Payroll", href: "/payroll", roles: ["SUPER_ADMIN", "ADMIN", "HR"] },
       { icon: Receipt, label: "My Payslip", href: "/payslip", roles: ["EMPLOYEE"] },
-      { icon: Wallet, label: "Allowances", href: "/allowances", roles: ["ADMIN", "HR"] },
-      { icon: SlidersHorizontal, label: "Adjustments", href: "/adjustments", roles: ["ADMIN", "HR"] },
-      { icon: CreditCard, label: "Loans", href: "/loans", roles: ["ADMIN", "HR"] },
-      { icon: FileText, label: "Reports", href: "/reports", roles: ["ADMIN", "HR"] },
+      { icon: Wallet, label: "Allowances", href: "/allowances", roles: ["SUPER_ADMIN", "ADMIN", "HR"] },
+      { icon: SlidersHorizontal, label: "Adjustments", href: "/adjustments", roles: ["SUPER_ADMIN", "ADMIN", "HR"] },
+      { icon: CreditCard, label: "Loans", href: "/loans", roles: ["SUPER_ADMIN", "ADMIN", "HR"] },
+      { icon: FileText, label: "Reports", href: "/reports", roles: ["SUPER_ADMIN", "ADMIN", "HR"] },
     ],
   },
 
@@ -96,9 +102,9 @@ const menuStructure: MenuEntry[] = [
   {
     label: "Finance",
     icon: Receipt,
-    roles: ["ADMIN", "HR", "FINANCE"],
+    roles: ["SUPER_ADMIN", "ADMIN", "HR", "FINANCE"],
     items: [
-      { icon: Receipt, label: "Finance Dashboard", href: "/finance", roles: ["ADMIN", "HR", "FINANCE"] },
+      { icon: Receipt, label: "Finance Dashboard", href: "/finance", roles: ["SUPER_ADMIN", "ADMIN", "HR", "FINANCE"] },
     ],
   },
 
@@ -106,14 +112,15 @@ const menuStructure: MenuEntry[] = [
   {
     label: "Settings",
     icon: Settings,
-    roles: ["ADMIN", "HR"],
+    roles: ["SUPER_ADMIN", "ADMIN", "HR"],
     items: [
-      { icon: Users, label: "Employees", href: "/employees", roles: ["ADMIN", "HR"] },
-      { icon: MapPin, label: "Office Locations", href: "/office-locations", roles: ["ADMIN", "HR"] },
-      { icon: Building2, label: "Departments", href: "/departments", roles: ["ADMIN", "HR"] },
-      { icon: Briefcase, label: "Roles", href: "/roles", roles: ["ADMIN", "HR"] },
-      { icon: Shield, label: "User Management", href: "/users", roles: ["ADMIN"] },
-      { icon: Settings, label: "System Settings", href: "/settings", roles: ["ADMIN"] },
+      { icon: Users, label: "Employees", href: "/employees", roles: ["SUPER_ADMIN", "ADMIN", "HR"] },
+      { icon: MapPin, label: "Office Locations", href: "/office-locations", roles: ["SUPER_ADMIN", "ADMIN", "HR"] },
+      { icon: Building2, label: "Departments", href: "/departments", roles: ["SUPER_ADMIN", "ADMIN", "HR"] },
+      { icon: Briefcase, label: "Roles", href: "/roles", roles: ["SUPER_ADMIN", "ADMIN", "HR"] },
+      { icon: Shield, label: "User Management", href: "/users", roles: ["SUPER_ADMIN", "ADMIN"] },
+      { icon: Building2, label: "Company Settings", href: "/settings/company", roles: ["SUPER_ADMIN", "ADMIN"] },
+      { icon: Settings, label: "System Settings", href: "/settings", roles: ["SUPER_ADMIN", "ADMIN"] },
     ],
   },
 ];
@@ -124,11 +131,15 @@ interface SidebarProps {
 }
 
 export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
-  const { data: session } = useSession() || {};
+  const { data: session, update: updateSession } = useSession() || {};
   const pathname = usePathname();
+  const router = useRouter();
   const [collapsed, setCollapsed] = useState(false);
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({});
-  const userRole = (session?.user as any)?.role || "EMPLOYEE";
+  const user = session?.user as any;
+  const userRole = user?.role || "EMPLOYEE";
+  const isImpersonating = !!user?.impersonatedCompanyId;
+  const companyName = user?.impersonatedCompanyName || user?.companyName || null;
 
   // Auto-open sections based on current path
   useEffect(() => {
@@ -160,6 +171,18 @@ export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
 
   const handleSignOut = () => {
     signOut({ callbackUrl: "/login" });
+  };
+
+  const handleStopImpersonating = async () => {
+    await updateSession({
+      impersonatedCompanyId: null,
+      impersonatedCompanyName: null,
+    });
+    toast({
+      title: "Impersonation Ended",
+      description: "Back to super admin view",
+    });
+    router.push("/super-admin");
   };
 
   const getInitials = (name?: string | null) => {
@@ -277,6 +300,31 @@ export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
         </Button>
       </div>
 
+      {/* Impersonation Banner */}
+      {isImpersonating && !collapsed && (
+        <div className="mx-2 mt-2 p-2 bg-amber-50 border border-amber-200 rounded-lg">
+          <div className="flex items-center gap-2 text-xs text-amber-800">
+            <Eye className="h-3 w-3 flex-shrink-0" />
+            <span className="font-medium truncate">Viewing: {user?.impersonatedCompanyName}</span>
+          </div>
+          <button
+            onClick={handleStopImpersonating}
+            className="mt-1 text-xs text-amber-700 hover:text-amber-900 flex items-center gap-1 font-medium"
+          >
+            <EyeOff className="h-3 w-3" />
+            Stop Impersonating
+          </button>
+        </div>
+      )}
+
+      {/* Company Name Display */}
+      {companyName && !isImpersonating && !collapsed && (
+        <div className="mx-3 mt-2 px-2 py-1.5 bg-gray-50 rounded-md">
+          <p className="text-xs text-muted-foreground">Company</p>
+          <p className="text-sm font-medium text-gray-900 truncate">{companyName}</p>
+        </div>
+      )}
+
       {/* Navigation */}
       <nav className="flex-1 py-4 overflow-y-auto">
         <ul className="space-y-1 px-2">
@@ -302,7 +350,12 @@ export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
             >
               <Avatar className="h-8 w-8">
                 <AvatarImage src="" />
-                <AvatarFallback className="bg-blue-100 text-blue-700 text-xs">
+                <AvatarFallback className={cn(
+                  "text-xs",
+                  userRole === "SUPER_ADMIN"
+                    ? "bg-purple-100 text-purple-700"
+                    : "bg-blue-100 text-blue-700"
+                )}>
                   {getInitials(session?.user?.name)}
                 </AvatarFallback>
               </Avatar>
@@ -311,8 +364,11 @@ export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
                   <span className="text-sm font-medium text-gray-900 truncate w-full">
                     {session?.user?.name || "User"}
                   </span>
-                  <span className="text-xs text-gray-500 truncate w-full">
-                    {userRole}
+                  <span className={cn(
+                    "text-xs truncate w-full",
+                    userRole === "SUPER_ADMIN" ? "text-purple-600 font-medium" : "text-gray-500"
+                  )}>
+                    {userRole === "SUPER_ADMIN" ? "⚡ Super Admin" : userRole}
                   </span>
                 </div>
               )}
@@ -333,6 +389,17 @@ export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
                 Notifications
               </Link>
             </DropdownMenuItem>
+            {userRole === "SUPER_ADMIN" && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem asChild>
+                  <Link href="/super-admin" className="flex items-center cursor-pointer">
+                    <Shield className="mr-2 h-4 w-4" />
+                    Super Admin Panel
+                  </Link>
+                </DropdownMenuItem>
+              </>
+            )}
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={handleSignOut} className="text-red-600 cursor-pointer">
               <LogOut className="mr-2 h-4 w-4" />

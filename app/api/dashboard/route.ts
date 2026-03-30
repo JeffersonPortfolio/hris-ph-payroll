@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth-options";
 import { prisma } from "@/lib/db";
+import { getCompanyContext } from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
 
@@ -12,27 +13,52 @@ export async function GET() {
       return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
     }
 
+    const ctx = await getCompanyContext();
+    if (!ctx) {
+      return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
+    }
+
+    // Build company filter for employee queries
+    const companyFilter: any = {};
+    if (ctx.companyId) {
+      companyFilter.companyId = ctx.companyId;
+    }
+
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    // Get employee stats
+    // Get employee stats (filtered by company)
     const [totalEmployees, activeEmployees, probationaryEmployees, regularEmployees] =
       await Promise.all([
-        prisma.employee.count({ where: { isActive: true } }),
+        prisma.employee.count({ where: { isActive: true, ...companyFilter } }),
         prisma.employee.count({
-          where: { isActive: true, employmentStatus: { not: "RESIGNED" } },
+          where: { isActive: true, employmentStatus: { not: "RESIGNED" }, ...companyFilter },
         }),
         prisma.employee.count({
-          where: { isActive: true, employmentStatus: "PROBATIONARY" },
+          where: { isActive: true, employmentStatus: "PROBATIONARY", ...companyFilter },
         }),
         prisma.employee.count({
-          where: { isActive: true, employmentStatus: "REGULAR" },
+          where: { isActive: true, employmentStatus: "REGULAR", ...companyFilter },
         }),
       ]);
 
+    // Get employee IDs for this company (for attendance/leave filtering)
+    const companyEmployeeIds = ctx.companyId
+      ? (await prisma.employee.findMany({
+          where: companyFilter,
+          select: { id: true },
+        })).map((e) => e.id)
+      : null;
+
+    // Build attendance filter
+    const attendanceFilter: any = { date: today };
+    if (companyEmployeeIds) {
+      attendanceFilter.employeeId = { in: companyEmployeeIds };
+    }
+
     // Get today's attendance stats
     const todayAttendance = await prisma.attendance.findMany({
-      where: { date: today },
+      where: attendanceFilter,
     });
 
     const todayPresent = todayAttendance.filter(
@@ -42,13 +68,21 @@ export async function GET() {
     const todayAbsent = todayAttendance.filter((a) => a.status === "ABSENT").length;
 
     // Get pending leaves
+    const leaveFilter: any = { status: "PENDING" };
+    if (companyEmployeeIds) {
+      leaveFilter.employeeId = { in: companyEmployeeIds };
+    }
     const pendingLeaves = await prisma.leave.count({
-      where: { status: "PENDING" },
+      where: leaveFilter,
     });
 
     // Get department distribution
+    const deptFilter: any = { isActive: true };
+    if (ctx.companyId) {
+      deptFilter.companyId = ctx.companyId;
+    }
     const departments = await prisma.department.findMany({
-      where: { isActive: true },
+      where: deptFilter,
       include: {
         _count: {
           select: { employees: true },
@@ -65,12 +99,17 @@ export async function GET() {
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
+    const leaveTypeFilter: any = {
+      createdAt: { gte: thirtyDaysAgo },
+      status: "APPROVED",
+    };
+    if (companyEmployeeIds) {
+      leaveTypeFilter.employeeId = { in: companyEmployeeIds };
+    }
+
     const leavesByType = await prisma.leave.groupBy({
       by: ["leaveType"],
-      where: {
-        createdAt: { gte: thirtyDaysAgo },
-        status: "APPROVED",
-      },
+      where: leaveTypeFilter,
       _count: true,
     });
 
@@ -86,8 +125,13 @@ export async function GET() {
       date.setDate(date.getDate() - i);
       date.setHours(0, 0, 0, 0);
 
+      const dayFilter: any = { date };
+      if (companyEmployeeIds) {
+        dayFilter.employeeId = { in: companyEmployeeIds };
+      }
+
       const dayAttendance = await prisma.attendance.findMany({
-        where: { date },
+        where: dayFilter,
       });
 
       attendanceTrends.push({
@@ -104,8 +148,14 @@ export async function GET() {
     }
 
     // Get recent activities
+    const recentLeaveFilter: any = {};
+    if (companyEmployeeIds) {
+      recentLeaveFilter.employeeId = { in: companyEmployeeIds };
+    }
+
     const recentLeaves = await prisma.leave.findMany({
       take: 5,
+      where: recentLeaveFilter,
       orderBy: { createdAt: "desc" },
       include: {
         employee: {
@@ -114,10 +164,15 @@ export async function GET() {
       },
     });
 
+    const recentAttFilter: any = { clockIn: { not: null } };
+    if (companyEmployeeIds) {
+      recentAttFilter.employeeId = { in: companyEmployeeIds };
+    }
+
     const recentAttendance = await prisma.attendance.findMany({
       take: 5,
       orderBy: { clockIn: "desc" },
-      where: { clockIn: { not: null } },
+      where: recentAttFilter,
       include: {
         employee: {
           select: { firstName: true, lastName: true },

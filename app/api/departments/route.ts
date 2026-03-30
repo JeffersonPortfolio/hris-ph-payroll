@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth-options";
 import { prisma } from "@/lib/db";
+import { getCompanyContext } from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
 
@@ -12,8 +13,18 @@ export async function GET() {
       return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
     }
 
+    const ctx = await getCompanyContext();
+    if (!ctx) {
+      return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
+    }
+
+    const where: any = { isActive: true };
+    if (ctx.companyId) {
+      where.companyId = ctx.companyId;
+    }
+
     const departments = await prisma.department.findMany({
-      where: { isActive: true },
+      where,
       include: {
         head: {
           select: {
@@ -47,8 +58,13 @@ export async function POST(request: Request) {
     }
 
     const role = (session.user as any)?.role;
-    if (role !== "ADMIN" && role !== "HR") {
+    if (role !== "ADMIN" && role !== "HR" && role !== "SUPER_ADMIN") {
       return NextResponse.json({ message: "Forbidden" }, { status: 403 });
+    }
+
+    const ctx = await getCompanyContext();
+    if (!ctx) {
+      return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
     }
 
     const { name, description, headId } = await request.json();
@@ -60,7 +76,12 @@ export async function POST(request: Request) {
       );
     }
 
-    const existing = await prisma.department.findUnique({ where: { name } });
+    // Check for existing department within the same company
+    const existingWhere: any = { name };
+    if (ctx.companyId) {
+      existingWhere.companyId = ctx.companyId;
+    }
+    const existing = await prisma.department.findFirst({ where: existingWhere });
     if (existing) {
       return NextResponse.json(
         { message: "Department already exists" },
@@ -73,6 +94,7 @@ export async function POST(request: Request) {
         name,
         description,
         headId: headId || null,
+        companyId: ctx.companyId || null,
       },
       include: {
         head: {

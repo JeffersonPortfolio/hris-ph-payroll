@@ -6,34 +6,42 @@ export default withAuth(
     const token = req.nextauth.token;
     const path = req.nextUrl.pathname;
 
-    // Admin only routes
+    // Super admin routes - only SUPER_ADMIN can access
+    const superAdminRoutes = ["/super-admin"];
+    if (superAdminRoutes.some((route) => path.startsWith(route))) {
+      if (token?.role !== "SUPER_ADMIN") {
+        return NextResponse.redirect(new URL("/dashboard", req.url));
+      }
+    }
+
+    // Admin only routes (also accessible by SUPER_ADMIN)
     const adminRoutes = ["/settings", "/users"];
     if (adminRoutes.some((route) => path.startsWith(route))) {
-      if (token?.role !== "ADMIN") {
+      if (token?.role !== "ADMIN" && token?.role !== "SUPER_ADMIN") {
         return NextResponse.redirect(new URL("/dashboard", req.url));
       }
     }
 
-    // Admin and HR routes
+    // Admin and HR routes (also accessible by SUPER_ADMIN)
     const hrRoutes = ["/employees/new", "/departments", "/roles"];
     if (hrRoutes.some((route) => path.startsWith(route))) {
-      if (token?.role !== "ADMIN" && token?.role !== "HR") {
+      if (token?.role !== "ADMIN" && token?.role !== "HR" && token?.role !== "SUPER_ADMIN") {
         return NextResponse.redirect(new URL("/dashboard", req.url));
       }
     }
 
-    // Finance routes - accessible by ADMIN, HR, FINANCE
+    // Finance routes - accessible by ADMIN, HR, FINANCE, SUPER_ADMIN
     const financeRoutes = ["/finance"];
     if (financeRoutes.some((route) => path.startsWith(route))) {
-      if (!["ADMIN", "HR", "FINANCE"].includes(token?.role as string)) {
+      if (!["ADMIN", "HR", "FINANCE", "SUPER_ADMIN"].includes(token?.role as string)) {
         return NextResponse.redirect(new URL("/dashboard", req.url));
       }
     }
 
-    // Payroll routes - accessible by ADMIN, HR
+    // Payroll routes - accessible by ADMIN, HR, SUPER_ADMIN
     const payrollRoutes = ["/payroll", "/allowances", "/adjustments", "/loans"];
     if (payrollRoutes.some((route) => path.startsWith(route))) {
-      if (!["ADMIN", "HR"].includes(token?.role as string)) {
+      if (!["ADMIN", "HR", "SUPER_ADMIN"].includes(token?.role as string)) {
         return NextResponse.redirect(new URL("/dashboard", req.url));
       }
     }
@@ -69,5 +77,6 @@ export const config = {
     "/work-schedules/:path*",
     "/holidays/:path*",
     "/office-locations/:path*",
+    "/super-admin/:path*",
   ],
 };

@@ -5,6 +5,7 @@ import { prisma } from "@/lib/db";
 import { generateEmployeeId } from "@/lib/utils";
 import bcrypt from "bcryptjs";
 import { sendNotificationEmail, getWelcomeEmailTemplate } from "@/lib/email";
+import { getCompanyContext } from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
 
@@ -12,6 +13,12 @@ export async function GET(request: Request) {
   try {
     const session = await getServerSession(authOptions);
     if (!session) {
+      return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
+    }
+
+    // Get company context for tenant filtering
+    const ctx = await getCompanyContext();
+    if (!ctx) {
       return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
     }
 
@@ -25,6 +32,11 @@ export async function GET(request: Request) {
     const minimal = searchParams.get("minimal") === "true";
 
     const where: any = {};
+
+    // Apply company filter (tenant isolation)
+    if (ctx.companyId) {
+      where.companyId = ctx.companyId;
+    }
 
     // Filter by account status (active/inactive)
     if (accountStatus === "active") {
@@ -109,8 +121,14 @@ export async function POST(request: Request) {
     }
 
     const role = (session.user as any)?.role;
-    if (role !== "ADMIN" && role !== "HR") {
+    if (role !== "ADMIN" && role !== "HR" && role !== "SUPER_ADMIN") {
       return NextResponse.json({ message: "Forbidden" }, { status: 403 });
+    }
+
+    // Get company context
+    const ctx = await getCompanyContext();
+    if (!ctx) {
+      return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
     }
 
     const data = await request.json();
@@ -189,6 +207,7 @@ export async function POST(request: Request) {
           password: hashedPassword,
           name: `${firstName} ${lastName}`,
           role: "EMPLOYEE",
+          companyId: ctx.companyId || null,
         },
       });
       userId = user.id;
@@ -250,6 +269,7 @@ export async function POST(request: Request) {
         tinNumber,
         bankName,
         bankAccountNumber,
+        companyId: ctx.companyId || null,
       },
       include: {
         department: true,

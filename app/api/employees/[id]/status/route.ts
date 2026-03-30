@@ -17,7 +17,7 @@ export async function PATCH(
     }
 
     const role = (session.user as any)?.role;
-    if (role !== "ADMIN") {
+    if (role !== "ADMIN" && role !== "SUPER_ADMIN") {
       return NextResponse.json({ message: "Only admins can change account status" }, { status: 403 });
     }
 
@@ -73,7 +73,7 @@ export async function DELETE(
     }
 
     const role = (session.user as any)?.role;
-    if (role !== "ADMIN") {
+    if (role !== "ADMIN" && role !== "SUPER_ADMIN") {
       return NextResponse.json({ message: "Only admins can delete accounts" }, { status: 403 });
     }
 

@@ -1,4 +1,4 @@
-import { UserRole, EmploymentType, EmploymentStatus, LeaveType, LeaveStatus, AttendanceStatus, Gender, CivilStatus } from "@prisma/client";
+import { UserRole, EmploymentType, EmploymentStatus, LeaveType, LeaveStatus, AttendanceStatus, Gender, CivilStatus, SubscriptionStatus, SubscriptionType } from "@prisma/client";
 
 export type {
   UserRole,
@@ -9,6 +9,8 @@ export type {
   AttendanceStatus,
   Gender,
   CivilStatus,
+  SubscriptionStatus,
+  SubscriptionType,
 };
 
 export interface SessionUser {
@@ -17,6 +19,10 @@ export interface SessionUser {
   name: string;
   role: UserRole;
   employeeId: string | null;
+  companyId: string | null;
+  companyName: string | null;
+  impersonatedCompanyId: string | null;
+  impersonatedCompanyName: string | null;
 }
 
 export interface DashboardStats {
