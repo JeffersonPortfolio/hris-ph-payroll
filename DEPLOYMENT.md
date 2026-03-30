@@ -53,7 +53,7 @@ You need a PostgreSQL database accessible from the internet. Here are your optio
 1. Go to your [Vercel Dashboard](https://vercel.com/dashboard)
 2. Click **"Storage"** in the top navigation
 3. Click **"Create Database"** → Select **"Postgres"**
-4. Choose a name (e.g., `hris-db`) and region (choose one close to you, e.g., **Singapore** `sin1` for Philippines)
+4. Choose a name (e.g., `hris-db`) and region. For Philippine-based deployments, choose **Singapore** (`ap-southeast-1`) or **Hong Kong** as the closest available regions to the Philippines
 5. Click **"Create"**
 6. Go to the **".env.local"** tab — copy the `POSTGRES_PRISMA_URL` value
 7. This will be your `DATABASE_URL`
