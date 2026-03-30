@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth-options';
 import { prisma } from '@/lib/db';
+import { getCompanyContext } from '@/lib/tenant';
 
 export const dynamic = 'force-dynamic';
 
@@ -13,9 +14,11 @@ export async function GET(request: NextRequest) {
     }
 
     const role = (session.user as any).role;
-    if (!['ADMIN', 'HR', 'FINANCE'].includes(role)) {
+    if (!['ADMIN', 'HR', 'FINANCE', 'SUPER_ADMIN'].includes(role)) {
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
+
+    const ctx = await getCompanyContext();
 
     const { searchParams } = new URL(request.url);
     const year = parseInt(searchParams.get('year') || new Date().getFullYear().toString());
@@ -32,6 +35,11 @@ export async function GET(request: NextRequest) {
       periodWhere.month = parseInt(month);
     }
 
+    // Tenant isolation
+    if (ctx?.companyId) {
+      periodWhere.companyId = ctx.companyId;
+    }
+
     const periods = await prisma.payrollPeriod.findMany({ where: periodWhere });
     const periodIds = periods.map(p => p.id);
 
@@ -39,7 +47,6 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ year, expenses: [], totals: { sss: 0, philhealth: 0, pagibig: 0, ec: 0, total: 0 } });
     }
 
-    // Get per-employee employer expenses
     const payrolls = await prisma.payroll.findMany({
       where: { payrollPeriodId: { in: periodIds } },
       include: {
@@ -48,7 +55,6 @@ export async function GET(request: NextRequest) {
       },
     });
 
-    // Group by employee
     const employeeExpenses: Record<string, any> = {};
     for (const p of payrolls) {
       const eid = p.employeeId;
@@ -70,20 +76,13 @@ export async function GET(request: NextRequest) {
 
     const r = (v: number) => Math.round(v * 100) / 100;
     const expenses = Object.values(employeeExpenses).map((e: any) => ({
-      ...e,
-      erSss: r(e.erSss),
-      erPhilhealth: r(e.erPhilhealth),
-      erPagibig: r(e.erPagibig),
-      erEc: r(e.erEc),
-      total: r(e.total),
+      ...e, erSss: r(e.erSss), erPhilhealth: r(e.erPhilhealth),
+      erPagibig: r(e.erPagibig), erEc: r(e.erEc), total: r(e.total),
     }));
 
     const totals = expenses.reduce((acc: any, e: any) => {
-      acc.sss += e.erSss;
-      acc.philhealth += e.erPhilhealth;
-      acc.pagibig += e.erPagibig;
-      acc.ec += e.erEc;
-      acc.total += e.total;
+      acc.sss += e.erSss; acc.philhealth += e.erPhilhealth;
+      acc.pagibig += e.erPagibig; acc.ec += e.erEc; acc.total += e.total;
       return acc;
     }, { sss: 0, philhealth: 0, pagibig: 0, ec: 0, total: 0 });
 
@@ -91,13 +90,7 @@ export async function GET(request: NextRequest) {
       year,
       filter: quarter || (month ? `Month ${month}` : 'Annual'),
       expenses,
-      totals: {
-        sss: r(totals.sss),
-        philhealth: r(totals.philhealth),
-        pagibig: r(totals.pagibig),
-        ec: r(totals.ec),
-        total: r(totals.total),
-      },
+      totals: { sss: r(totals.sss), philhealth: r(totals.philhealth), pagibig: r(totals.pagibig), ec: r(totals.ec), total: r(totals.total) },
     });
   } catch (error) {
     console.error('Error fetching employer expenses:', error);

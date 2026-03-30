@@ -2,11 +2,17 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth-options';
 import { prisma } from '@/lib/db';
+import { getCompanyContext } from '@/lib/tenant';
 
 export async function GET(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || !['ADMIN', 'HR'].includes((session.user as any).role)) {
+    if (!session || !['ADMIN', 'HR', 'SUPER_ADMIN'].includes((session.user as any).role)) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const ctx = await getCompanyContext();
+    if (!ctx) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
@@ -14,15 +20,21 @@ export async function GET(request: NextRequest) {
     const year = parseInt(searchParams.get('year') || new Date().getFullYear().toString());
     const month = searchParams.get('month') ? parseInt(searchParams.get('month')!) : null;
 
-    // Get all departments
+    // Get departments scoped by company
+    const deptWhere: any = { isActive: true };
+    if (ctx.companyId) deptWhere.companyId = ctx.companyId;
+
     const departments = await prisma.department.findMany({
-      where: { isActive: true },
+      where: deptWhere,
       orderBy: { name: 'asc' },
     });
 
-    // Get all employees with their departments
+    // Get employees scoped by company
+    const empWhere: any = { isActive: true };
+    if (ctx.companyId) empWhere.companyId = ctx.companyId;
+
     const employees = await prisma.employee.findMany({
-      where: { isActive: true },
+      where: empWhere,
       select: { id: true, departmentId: true },
     });
 
@@ -30,11 +42,9 @@ export async function GET(request: NextRequest) {
 
     // Build date range filter
     const dateFilter: any = { year };
-    if (month) {
-      dateFilter.month = month;
-    }
+    if (month) dateFilter.month = month;
+    if (ctx.companyId) dateFilter.companyId = ctx.companyId;
 
-    // Get payroll periods for the specified timeframe
     const periods = await prisma.payrollPeriod.findMany({
       where: dateFilter,
       include: {
@@ -57,7 +67,6 @@ export async function GET(request: NextRequest) {
       employeeCount: number;
     }} = {};
 
-    // Initialize department costs
     for (const dept of departments) {
       departmentCosts[dept.id] = {
         name: dept.name,
@@ -70,7 +79,6 @@ export async function GET(request: NextRequest) {
       };
     }
 
-    // Add "Unassigned" for employees without department
     departmentCosts['unassigned'] = {
       name: 'Unassigned',
       monthly: {},
@@ -81,29 +89,28 @@ export async function GET(request: NextRequest) {
       employeeCount: 0,
     };
 
-    // Track unique employees per department
     const deptEmployees: { [key: string]: Set<string> } = {};
     for (const deptId of Object.keys(departmentCosts)) {
       deptEmployees[deptId] = new Set();
     }
 
-    // Process payrolls
+    // Only include payrolls for employees in our company
+    const companyEmployeeIds = new Set(employees.map(e => e.id));
+
     for (const period of periods) {
       const monthKey = `${period.year}-${String(period.month).padStart(2, '0')}`;
 
       for (const payroll of period.payrolls) {
+        // Skip payrolls for employees not in this company
+        if (ctx.companyId && !companyEmployeeIds.has(payroll.employeeId)) continue;
+
         const deptId = employeeDeptMap.get(payroll.employeeId) || 'unassigned';
         const dept = departmentCosts[deptId] || departmentCosts['unassigned'];
 
-        // Track employee
         deptEmployees[deptId]?.add(payroll.employeeId);
 
-        // Initialize monthly if not exists
-        if (!dept.monthly[monthKey]) {
-          dept.monthly[monthKey] = 0;
-        }
+        if (!dept.monthly[monthKey]) dept.monthly[monthKey] = 0;
 
-        // Add costs
         const employerContrib = payroll.employerSSS + payroll.employerPhilHealth + payroll.employerPagIbig;
         dept.monthly[monthKey] += payroll.grossEarnings;
         dept.totalGross += payroll.grossEarnings;
@@ -113,12 +120,10 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // Set employee counts
     for (const deptId of Object.keys(departmentCosts)) {
       departmentCosts[deptId].employeeCount = deptEmployees[deptId]?.size || 0;
     }
 
-    // Calculate grand totals
     const grandTotal = {
       totalGross: 0,
       totalNet: 0,
@@ -133,15 +138,12 @@ export async function GET(request: NextRequest) {
       grandTotal.totalDeductions += dept.totalDeductions;
       grandTotal.employerContributions += dept.employerContributions;
 
-      for (const [month, cost] of Object.entries(dept.monthly)) {
-        if (!grandTotal.monthly[month]) {
-          grandTotal.monthly[month] = 0;
-        }
-        grandTotal.monthly[month] += cost;
+      for (const [m, cost] of Object.entries(dept.monthly)) {
+        if (!grandTotal.monthly[m]) grandTotal.monthly[m] = 0;
+        grandTotal.monthly[m] += cost;
       }
     }
 
-    // Generate months list for the year
     const months = month 
       ? [`${year}-${String(month).padStart(2, '0')}`]
       : Array.from({ length: 12 }, (_, i) => `${year}-${String(i + 1).padStart(2, '0')}`);

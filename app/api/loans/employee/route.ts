@@ -3,6 +3,7 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth-options';
 import { prisma } from '@/lib/db';
 import { generateAmortizationSchedule } from '@/lib/loan-utils';
+import { getCompanyContext } from '@/lib/tenant';
 
 // GET employee loans
 export async function GET(request: NextRequest) {
@@ -12,16 +13,22 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
+    const ctx = await getCompanyContext();
+    if (!ctx) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
     const { searchParams } = new URL(request.url);
     const employeeId = searchParams.get('employeeId');
     const status = searchParams.get('status');
 
     const where: any = {};
-    if (employeeId) {
-      where.employeeId = employeeId;
-    }
-    if (status) {
-      where.status = status;
+    if (employeeId) where.employeeId = employeeId;
+    if (status) where.status = status;
+
+    // Filter by company through employee
+    if (ctx.companyId) {
+      where.employee = { companyId: ctx.companyId };
     }
 
     const employeeLoans = await prisma.employeeLoan.findMany({
@@ -35,10 +42,13 @@ export async function GET(request: NextRequest) {
       orderBy: { createdAt: 'desc' },
     });
 
-    // Fetch employee details including department and role
+    // Fetch employee details
     const employeeIds = [...new Set(employeeLoans.map(el => el.employeeId))];
+    const employeeWhere: any = { id: { in: employeeIds } };
+    if (ctx.companyId) employeeWhere.companyId = ctx.companyId;
+
     const employees = await prisma.employee.findMany({
-      where: { id: { in: employeeIds } },
+      where: employeeWhere,
       select: {
         id: true,
         firstName: true,
@@ -67,25 +77,30 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || !['ADMIN', 'HR'].includes((session.user as any).role)) {
+    if (!session || !['ADMIN', 'HR', 'SUPER_ADMIN'].includes((session.user as any).role)) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const ctx = await getCompanyContext();
+    if (!ctx) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
     const body = await request.json();
     const {
-      employeeId,
-      loanTypeId,
-      principalAmount,
-      termMonths,
-      startDate,
-      notes,
-      applicationDate,
-      loanDate,
-      referenceNumber,
-      firstAmortizationDate,
-      payrollCutoff,
-      remarks,
+      employeeId, loanTypeId, principalAmount, termMonths, startDate, notes,
+      applicationDate, loanDate, referenceNumber, firstAmortizationDate, payrollCutoff, remarks,
     } = body;
+
+    // Verify employee belongs to company
+    if (ctx.companyId) {
+      const employee = await prisma.employee.findFirst({
+        where: { id: employeeId, companyId: ctx.companyId },
+      });
+      if (!employee) {
+        return NextResponse.json({ error: 'Employee not found' }, { status: 404 });
+      }
+    }
 
     // Get loan type for interest rate
     const loanType = await prisma.loanType.findUnique({ where: { id: loanTypeId } });
@@ -96,23 +111,18 @@ export async function POST(request: NextRequest) {
     const principal = parseFloat(principalAmount);
     const term = parseInt(termMonths);
 
-    // Calculate simple interest
     const interestAmount = principal * (loanType.interestRate / 100) * (term / 12);
     const totalAmount = principal + interestAmount;
     const monthlyDeduction = totalAmount / term;
 
-    // Calculate end date
     const start = new Date(startDate);
     const end = new Date(start);
     end.setMonth(end.getMonth() + term);
 
-    // Parse first amortization date (defaults to startDate if not provided)
     const amortStart = firstAmortizationDate ? new Date(firstAmortizationDate) : start;
 
-    // Generate amortization schedule
     const { periods, perPayAmount } = generateAmortizationSchedule(totalAmount, term, amortStart);
 
-    // Adjust last period to handle rounding
     const regularTotal = perPayAmount * (periods.length - 1);
     const lastAmount = Math.round((totalAmount - regularTotal) * 100) / 100;
 
@@ -166,12 +176,27 @@ export async function POST(request: NextRequest) {
 export async function PUT(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || !['ADMIN', 'HR'].includes((session.user as any).role)) {
+    if (!session || !['ADMIN', 'HR', 'SUPER_ADMIN'].includes((session.user as any).role)) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const ctx = await getCompanyContext();
+    if (!ctx) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
     const body = await request.json();
     const { id, status, notes } = body;
+
+    // Verify ownership through employee
+    if (ctx.companyId) {
+      const existing = await prisma.employeeLoan.findFirst({
+        where: { id, employee: { companyId: ctx.companyId } },
+      });
+      if (!existing) {
+        return NextResponse.json({ error: 'Loan not found' }, { status: 404 });
+      }
+    }
 
     const employeeLoan = await prisma.employeeLoan.update({
       where: { id },
@@ -180,9 +205,7 @@ export async function PUT(request: NextRequest) {
         notes,
         ...(status === 'APPROVED' ? { approvedAt: new Date() } : {}),
       },
-      include: {
-        loanType: true,
-      },
+      include: { loanType: true },
     });
 
     return NextResponse.json(employeeLoan);
@@ -196,24 +219,37 @@ export async function PUT(request: NextRequest) {
 export async function PATCH(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || !['ADMIN', 'HR'].includes((session.user as any).role)) {
+    if (!session || !['ADMIN', 'HR', 'SUPER_ADMIN'].includes((session.user as any).role)) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const ctx = await getCompanyContext();
+    if (!ctx) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
     const body = await request.json();
     const { loanId, amount, paymentDate, payrollPeriodId, notes } = body;
 
-    // Get current loan
     const loan = await prisma.employeeLoan.findUnique({ where: { id: loanId } });
     if (!loan) {
       return NextResponse.json({ error: 'Loan not found' }, { status: 404 });
+    }
+
+    // Verify ownership through employee
+    if (ctx.companyId) {
+      const employee = await prisma.employee.findFirst({
+        where: { id: loan.employeeId, companyId: ctx.companyId },
+      });
+      if (!employee) {
+        return NextResponse.json({ error: 'Loan not found' }, { status: 404 });
+      }
     }
 
     const paymentAmount = parseFloat(amount);
     const newAmountPaid = loan.amountPaid + paymentAmount;
     const newRemainingBalance = loan.remainingBalance - paymentAmount;
 
-    // Create payment record and update loan
     const [payment, updatedLoan] = await prisma.$transaction([
       prisma.loanPayment.create({
         data: {

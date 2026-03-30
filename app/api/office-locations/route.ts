@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth-options';
 import { prisma } from '@/lib/db';
+import { getCompanyContext } from '@/lib/tenant';
 
 // GET all office locations
 export async function GET() {
@@ -11,11 +12,17 @@ export async function GET() {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
+    const ctx = await getCompanyContext();
+
+    const where: any = {};
+    if (ctx?.companyId) {
+      where.OR = [{ companyId: ctx.companyId }, { companyId: null }];
+    }
+
     const locations = await prisma.officeLocation.findMany({
+      where,
       orderBy: { name: 'asc' },
-      include: {
-        departmentLocations: true,
-      },
+      include: { departmentLocations: true },
     });
 
     return NextResponse.json(locations);
@@ -29,20 +36,21 @@ export async function GET() {
 export async function POST(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || !['ADMIN', 'HR'].includes((session.user as any).role)) {
+    if (!session || !['ADMIN', 'HR', 'SUPER_ADMIN'].includes((session.user as any).role)) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
+    const ctx = await getCompanyContext();
     const body = await request.json();
     const { name, address, latitude, longitude, radiusMeters } = body;
 
     const location = await prisma.officeLocation.create({
       data: {
-        name,
-        address,
+        name, address,
         latitude: parseFloat(latitude),
         longitude: parseFloat(longitude),
         radiusMeters: Math.round(parseFloat(radiusMeters)) || 100,
+        companyId: ctx?.companyId || null,
       },
     });
 
@@ -60,7 +68,7 @@ export async function POST(request: NextRequest) {
 export async function PUT(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || !['ADMIN', 'HR'].includes((session.user as any).role)) {
+    if (!session || !['ADMIN', 'HR', 'SUPER_ADMIN'].includes((session.user as any).role)) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
@@ -70,8 +78,7 @@ export async function PUT(request: NextRequest) {
     const location = await prisma.officeLocation.update({
       where: { id },
       data: {
-        name,
-        address,
+        name, address,
         latitude: latitude ? parseFloat(latitude) : undefined,
         longitude: longitude ? parseFloat(longitude) : undefined,
         radiusMeters: radiusMeters ? Math.round(parseFloat(radiusMeters)) : undefined,
@@ -90,19 +97,17 @@ export async function PUT(request: NextRequest) {
 export async function DELETE(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || !['ADMIN'].includes((session.user as any).role)) {
+    if (!session || !['ADMIN', 'SUPER_ADMIN'].includes((session.user as any).role)) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
     const { searchParams } = new URL(request.url);
     const id = searchParams.get('id');
-
     if (!id) {
       return NextResponse.json({ error: 'ID required' }, { status: 400 });
     }
 
     await prisma.officeLocation.delete({ where: { id } });
-
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error('Error deleting office location:', error);
@@ -114,19 +119,17 @@ export async function DELETE(request: NextRequest) {
 export async function PATCH(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || !['ADMIN', 'HR'].includes((session.user as any).role)) {
+    if (!session || !['ADMIN', 'HR', 'SUPER_ADMIN'].includes((session.user as any).role)) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
     const body = await request.json();
     const { locationId, departmentIds, isDefault } = body;
 
-    // Remove existing assignments
     await prisma.departmentLocation.deleteMany({
       where: { officeLocationId: locationId },
     });
 
-    // Create new assignments
     if (departmentIds && departmentIds.length > 0) {
       await prisma.departmentLocation.createMany({
         data: departmentIds.map((deptId: string) => ({

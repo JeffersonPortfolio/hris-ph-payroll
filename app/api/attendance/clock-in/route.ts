@@ -4,6 +4,7 @@ import { authOptions } from "@/lib/auth-options";
 import { prisma } from "@/lib/db";
 import { calculateLateMinutes } from "@/lib/utils";
 import { validateGeofence } from "@/lib/geofence";
+import { getCompanyContext } from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
 
@@ -14,10 +15,30 @@ export async function POST(request: Request) {
       return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
     }
 
+    const ctx = await getCompanyContext();
+    if (!ctx) {
+      return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
+    }
+
     const { employeeId, latitude, longitude } = await request.json();
 
     if (!employeeId) {
       return NextResponse.json({ message: "Employee ID required" }, { status: 400 });
+    }
+
+    // Verify the employee belongs to the same company
+    let employeeCompanyId: string | null = null;
+    if (ctx.companyId) {
+      const employee = await prisma.employee.findFirst({
+        where: { id: employeeId, companyId: ctx.companyId },
+      });
+      if (!employee) {
+        return NextResponse.json({ message: "Employee not found" }, { status: 404 });
+      }
+      employeeCompanyId = employee.companyId;
+    } else {
+      const employee = await prisma.employee.findUnique({ where: { id: employeeId } });
+      employeeCompanyId = employee?.companyId || null;
     }
 
     // Validate geofence before allowing clock-in
@@ -68,6 +89,7 @@ export async function POST(request: Request) {
         clockIn: now,
         status,
         lateMinutes,
+        companyId: employeeCompanyId,
       },
     });
 

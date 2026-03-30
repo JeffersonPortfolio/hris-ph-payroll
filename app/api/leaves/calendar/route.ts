@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth-options";
 import { prisma } from "@/lib/db";
+import { getCompanyContext } from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
 
@@ -11,6 +12,8 @@ export async function GET(request: Request) {
     if (!session) {
       return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
     }
+
+    const ctx = await getCompanyContext();
 
     const { searchParams } = new URL(request.url);
     const year = parseInt(searchParams.get("year") || new Date().getFullYear().toString());
@@ -31,18 +34,16 @@ export async function GET(request: Request) {
 
     const where: any = {
       status: "APPROVED",
-      OR: [
-        {
-          startDate: { lte: endDate },
-          endDate: { gte: startDate },
-        },
-      ],
+      OR: [{ startDate: { lte: endDate }, endDate: { gte: startDate } }],
     };
 
+    // Tenant isolation
+    if (ctx?.companyId) {
+      where.employee = { companyId: ctx.companyId };
+    }
+
     if (departmentId) {
-      where.employee = {
-        departmentId,
-      };
+      where.employee = { ...where.employee, departmentId };
     }
 
     const leaves = await prisma.leave.findMany({
@@ -59,7 +60,6 @@ export async function GET(request: Request) {
       orderBy: { startDate: "asc" },
     });
 
-    // Transform to calendar events
     const events = leaves.map((leave) => ({
       id: leave.id,
       title: `${leave.employee?.firstName ?? ""} ${leave.employee?.lastName ?? ""} - ${leave.leaveType}`,
@@ -73,9 +73,6 @@ export async function GET(request: Request) {
     return NextResponse.json({ events });
   } catch (error) {
     console.error("Get leave calendar error:", error);
-    return NextResponse.json(
-      { message: "Internal server error" },
-      { status: 500 }
-    );
+    return NextResponse.json({ message: "Internal server error" }, { status: 500 });
   }
 }

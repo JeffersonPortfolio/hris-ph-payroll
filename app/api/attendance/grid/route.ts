@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth-options";
 import { prisma } from "@/lib/db";
+import { getCompanyContext } from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
 
@@ -10,6 +11,11 @@ export async function GET(request: Request) {
   try {
     const session = await getServerSession(authOptions);
     if (!session) {
+      return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
+    }
+
+    const ctx = await getCompanyContext();
+    if (!ctx) {
       return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
     }
 
@@ -25,15 +31,39 @@ export async function GET(request: Request) {
       );
     }
 
-    const userRole = (session.user as any)?.role;
-    const sessionEmployeeId = (session.user as any)?.employeeId;
-
-    // Build employee filter
+    // Build employee filter with tenant isolation
     const employeeWhere: any = { isActive: true };
-    if (userRole === "EMPLOYEE") {
-      employeeWhere.id = sessionEmployeeId;
+    if (ctx.companyId) {
+      employeeWhere.companyId = ctx.companyId;
+    }
+    if (ctx.role === "EMPLOYEE") {
+      employeeWhere.id = ctx.employeeId;
     } else if (departmentId && departmentId !== "all") {
       employeeWhere.departmentId = departmentId;
+    }
+
+    // Build attendance filter
+    const attendanceWhere: any = {
+      date: {
+        gte: new Date(startDate),
+        lte: new Date(endDate),
+      },
+    };
+    if (ctx.companyId) {
+      attendanceWhere.employee = { companyId: ctx.companyId };
+    }
+    if (ctx.role === "EMPLOYEE") {
+      attendanceWhere.employeeId = ctx.employeeId;
+    } else if (departmentId && departmentId !== "all") {
+      attendanceWhere.employee = { ...attendanceWhere.employee, departmentId };
+    }
+
+    // Holiday filter with company scope
+    const holidayWhere: any = {
+      date: { gte: new Date(startDate), lte: new Date(endDate) },
+    };
+    if (ctx.companyId) {
+      holidayWhere.OR = [{ companyId: ctx.companyId }, { companyId: null }];
     }
 
     // Fetch employees and attendance in parallel
@@ -52,18 +82,7 @@ export async function GET(request: Request) {
         take: 500,
       }),
       prisma.attendance.findMany({
-        where: {
-          date: {
-            gte: new Date(startDate),
-            lte: new Date(endDate),
-          },
-          ...(userRole === "EMPLOYEE" ? { employeeId: sessionEmployeeId } : {}),
-          ...(departmentId && departmentId !== "all"
-            ? {
-                employee: { departmentId },
-              }
-            : {}),
-        },
+        where: attendanceWhere,
         select: {
           id: true,
           employeeId: true,
@@ -86,12 +105,7 @@ export async function GET(request: Request) {
         orderBy: { date: "asc" },
       }),
       prisma.holiday.findMany({
-        where: {
-          date: {
-            gte: new Date(startDate),
-            lte: new Date(endDate),
-          },
-        },
+        where: holidayWhere,
         select: {
           id: true,
           name: true,

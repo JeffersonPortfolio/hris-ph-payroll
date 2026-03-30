@@ -5,6 +5,7 @@ import { prisma } from "@/lib/db";
 import { calculateWorkHoursDetailed } from "@/lib/utils";
 import { AttendanceStatus } from "@prisma/client";
 import { validateGeofence } from "@/lib/geofence";
+import { getCompanyContext } from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
 
@@ -12,6 +13,11 @@ export async function POST(request: Request) {
   try {
     const session = await getServerSession(authOptions);
     if (!session) {
+      return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
+    }
+
+    const ctx = await getCompanyContext();
+    if (!ctx) {
       return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
     }
 
@@ -23,9 +29,15 @@ export async function POST(request: Request) {
 
     const attendance = await prisma.attendance.findUnique({
       where: { id: attendanceId },
+      include: { employee: { select: { companyId: true } } },
     });
 
     if (!attendance) {
+      return NextResponse.json({ message: "Attendance not found" }, { status: 404 });
+    }
+
+    // Verify company access
+    if (ctx.companyId && attendance.employee?.companyId !== ctx.companyId) {
       return NextResponse.json({ message: "Attendance not found" }, { status: 404 });
     }
 

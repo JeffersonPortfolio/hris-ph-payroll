@@ -2,12 +2,18 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth-options';
 import { prisma } from '@/lib/db';
+import { getCompanyContext } from '@/lib/tenant';
 
 // GET employee allowances
 export async function GET(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
     if (!session) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const ctx = await getCompanyContext();
+    if (!ctx) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
@@ -19,6 +25,11 @@ export async function GET(request: NextRequest) {
       where.employeeId = employeeId;
     }
 
+    // Filter by company through employee relation
+    if (ctx.companyId) {
+      where.employee = { companyId: ctx.companyId };
+    }
+
     const employeeAllowances = await prisma.employeeAllowance.findMany({
       where,
       include: {
@@ -27,10 +38,13 @@ export async function GET(request: NextRequest) {
       orderBy: { createdAt: 'desc' },
     });
 
-    // Fetch employee details separately
+    // Fetch employee details
     const employeeIds = [...new Set(employeeAllowances.map(ea => ea.employeeId))];
+    const employeeWhere: any = { id: { in: employeeIds } };
+    if (ctx.companyId) employeeWhere.companyId = ctx.companyId;
+
     const employees = await prisma.employee.findMany({
-      where: { id: { in: employeeIds } },
+      where: employeeWhere,
       select: { id: true, firstName: true, lastName: true, employeeId: true, department: { select: { id: true, name: true } } },
     });
 
@@ -52,15 +66,36 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || !['ADMIN', 'HR'].includes((session.user as any).role)) {
+    if (!session || !['ADMIN', 'HR', 'SUPER_ADMIN'].includes((session.user as any).role)) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const ctx = await getCompanyContext();
+    if (!ctx) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
     const body = await request.json();
 
-    // Bulk assignment: array of { employeeId, amount }
+    // Bulk assignment
     if (body.assignments && Array.isArray(body.assignments)) {
-      const { allowanceTypeId, frequency, effectiveFrom, effectiveTo, payrollCutoff, prorated, proratedBy, assignments } = body;
+      const { allowanceTypeId, frequency, effectiveFrom, effectiveTo, assignments } = body;
+
+      // Verify all employees belong to company
+      if (ctx.companyId) {
+        const empIds = assignments.map((a: any) => a.employeeId).filter(Boolean);
+        const validEmployees = await prisma.employee.findMany({
+          where: { id: { in: empIds }, companyId: ctx.companyId },
+          select: { id: true },
+        });
+        const validIds = new Set(validEmployees.map(e => e.id));
+        for (const a of assignments) {
+          if (a.employeeId && !validIds.has(a.employeeId)) {
+            return NextResponse.json({ error: `Employee ${a.employeeId} not found in your company` }, { status: 404 });
+          }
+        }
+      }
+
       const results = [];
       for (const a of assignments) {
         if (!a.employeeId || !a.amount) continue;
@@ -80,8 +115,18 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(results, { status: 201 });
     }
 
-    // Single assignment (backward compatible)
+    // Single assignment
     const { employeeId, allowanceTypeId, amount, frequency, effectiveFrom, effectiveTo } = body;
+
+    // Verify employee belongs to company
+    if (ctx.companyId) {
+      const employee = await prisma.employee.findFirst({
+        where: { id: employeeId, companyId: ctx.companyId },
+      });
+      if (!employee) {
+        return NextResponse.json({ error: 'Employee not found' }, { status: 404 });
+      }
+    }
 
     const employeeAllowance = await prisma.employeeAllowance.create({
       data: {
@@ -92,9 +137,7 @@ export async function POST(request: NextRequest) {
         effectiveFrom: new Date(effectiveFrom),
         effectiveTo: effectiveTo ? new Date(effectiveTo) : null,
       },
-      include: {
-        allowanceType: true,
-      },
+      include: { allowanceType: true },
     });
 
     return NextResponse.json(employeeAllowance, { status: 201 });
@@ -108,12 +151,27 @@ export async function POST(request: NextRequest) {
 export async function PUT(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || !['ADMIN', 'HR'].includes((session.user as any).role)) {
+    if (!session || !['ADMIN', 'HR', 'SUPER_ADMIN'].includes((session.user as any).role)) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const ctx = await getCompanyContext();
+    if (!ctx) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
     const body = await request.json();
     const { id, amount, frequency, effectiveFrom, effectiveTo, isActive } = body;
+
+    // Verify ownership through employee
+    if (ctx.companyId) {
+      const existing = await prisma.employeeAllowance.findFirst({
+        where: { id, employee: { companyId: ctx.companyId } },
+      });
+      if (!existing) {
+        return NextResponse.json({ error: 'Allowance not found' }, { status: 404 });
+      }
+    }
 
     const employeeAllowance = await prisma.employeeAllowance.update({
       where: { id },
@@ -124,9 +182,7 @@ export async function PUT(request: NextRequest) {
         effectiveTo: effectiveTo ? new Date(effectiveTo) : null,
         isActive,
       },
-      include: {
-        allowanceType: true,
-      },
+      include: { allowanceType: true },
     });
 
     return NextResponse.json(employeeAllowance);
@@ -140,7 +196,12 @@ export async function PUT(request: NextRequest) {
 export async function DELETE(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || !['ADMIN', 'HR'].includes((session.user as any).role)) {
+    if (!session || !['ADMIN', 'HR', 'SUPER_ADMIN'].includes((session.user as any).role)) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const ctx = await getCompanyContext();
+    if (!ctx) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
@@ -151,9 +212,17 @@ export async function DELETE(request: NextRequest) {
       return NextResponse.json({ error: 'ID required' }, { status: 400 });
     }
 
-    await prisma.employeeAllowance.delete({
-      where: { id },
-    });
+    // Verify ownership through employee
+    if (ctx.companyId) {
+      const existing = await prisma.employeeAllowance.findFirst({
+        where: { id, employee: { companyId: ctx.companyId } },
+      });
+      if (!existing) {
+        return NextResponse.json({ error: 'Allowance not found' }, { status: 404 });
+      }
+    }
+
+    await prisma.employeeAllowance.delete({ where: { id } });
 
     return NextResponse.json({ success: true });
   } catch (error) {

@@ -4,6 +4,7 @@ import { authOptions } from '@/lib/auth-options';
 import { prisma } from '@/lib/db';
 import { generatePayslipHTML } from '@/lib/payslip-generator';
 import { uploadPayslipToS3 } from '@/lib/s3';
+import { getCompanyContext } from '@/lib/tenant';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,24 +16,25 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
+    const ctx = await getCompanyContext();
+
     const { searchParams } = new URL(request.url);
     const year = searchParams.get('year');
     const month = searchParams.get('month');
 
     const where: any = {};
-    if (year) {
-      where.year = parseInt(year);
-    }
-    if (month) {
-      where.month = parseInt(month);
+    if (year) where.year = parseInt(year);
+    if (month) where.month = parseInt(month);
+
+    // Tenant isolation
+    if (ctx?.companyId) {
+      where.companyId = ctx.companyId;
     }
 
     const periods = await prisma.payrollPeriod.findMany({
       where,
       include: {
-        _count: {
-          select: { payrolls: true }
-        }
+        _count: { select: { payrolls: true } },
       },
       orderBy: [
         { year: 'desc' },
@@ -52,9 +54,11 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || !['ADMIN', 'HR'].includes((session.user as any).role)) {
+    if (!session || !['ADMIN', 'HR', 'SUPER_ADMIN'].includes((session.user as any).role)) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
+
+    const ctx = await getCompanyContext();
 
     const body = await request.json();
     const { month, year, periodType } = body;
@@ -62,19 +66,18 @@ export async function POST(request: NextRequest) {
     const m = parseInt(month);
     const y = parseInt(year);
 
-    // Fetch cutoff settings from database
-    const settings = await prisma.systemSettings.findMany({
-      where: {
-        key: {
-          in: ['payroll_cutoff_1_start', 'payroll_cutoff_1_end', 'payroll_cutoff_2_start', 'payroll_cutoff_2_end']
-        }
+    // Fetch cutoff settings - company-specific or global
+    const settingsWhere: any = {
+      key: {
+        in: ['payroll_cutoff_1_start', 'payroll_cutoff_1_end', 'payroll_cutoff_2_start', 'payroll_cutoff_2_end']
       }
-    });
+    };
+
+    const settings = await prisma.systemSettings.findMany({ where: settingsWhere });
     
     const settingsMap: Record<string, string> = {};
     settings.forEach(s => { settingsMap[s.key] = s.value; });
     
-    // Default cutoffs: 27-10 and 11-25
     const cutoff1Start = parseInt(settingsMap.payroll_cutoff_1_start || '27');
     const cutoff1End = parseInt(settingsMap.payroll_cutoff_1_end || '10');
     const cutoff2Start = parseInt(settingsMap.payroll_cutoff_2_start || '11');
@@ -86,7 +89,6 @@ export async function POST(request: NextRequest) {
     let payDate: Date;
 
     if (periodType === 'FIRST_HALF') {
-      // First cutoff: e.g., 27th of previous month to 10th of current month
       const prevMonth = m === 1 ? 12 : m - 1;
       const prevYear = m === 1 ? y - 1 : y;
       startDate = new Date(prevYear, prevMonth - 1, cutoff1Start);
@@ -94,28 +96,24 @@ export async function POST(request: NextRequest) {
       cutoffDate = new Date(y, m - 1, cutoff1End);
       payDate = new Date(y, m - 1, 15);
     } else if (periodType === 'SECOND_HALF') {
-      // Second cutoff: e.g., 11th to 25th of current month
       startDate = new Date(y, m - 1, cutoff2Start);
       endDate = new Date(y, m - 1, cutoff2End);
       cutoffDate = new Date(y, m - 1, cutoff2End);
       const lastDay = new Date(y, m, 0).getDate();
       payDate = new Date(y, m - 1, Math.min(30, lastDay));
     } else if (periodType === 'MONTHLY') {
-      // Full month: 1st to last day
       startDate = new Date(y, m - 1, 1);
       const lastDay = new Date(y, m, 0).getDate();
       endDate = new Date(y, m - 1, lastDay);
       cutoffDate = new Date(y, m - 1, lastDay);
       payDate = new Date(y, m - 1, Math.min(30, lastDay));
     } else if (periodType === 'BI_WEEKLY') {
-      // Bi-weekly: using the provided start date from body, or default to 1st-14th
       const biWeekStart = body.startDay ? parseInt(body.startDay) : 1;
       startDate = new Date(y, m - 1, biWeekStart);
       endDate = new Date(y, m - 1, biWeekStart + 13);
       cutoffDate = new Date(y, m - 1, biWeekStart + 13);
       payDate = new Date(y, m - 1, biWeekStart + 14);
     } else {
-      // Default fallback
       startDate = new Date(y, m - 1, 1);
       endDate = new Date(y, m - 1, 15);
       cutoffDate = new Date(y, m - 1, 15);
@@ -132,6 +130,7 @@ export async function POST(request: NextRequest) {
         cutoffDate,
         payDate,
         status: 'DRAFT',
+        companyId: ctx?.companyId || null,
       },
     });
 
@@ -149,7 +148,7 @@ export async function POST(request: NextRequest) {
 export async function PUT(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || !['ADMIN', 'HR'].includes((session.user as any).role)) {
+    if (!session || !['ADMIN', 'HR', 'SUPER_ADMIN'].includes((session.user as any).role)) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
@@ -157,15 +156,9 @@ export async function PUT(request: NextRequest) {
     const { id, status, notes, isLocked } = body;
 
     const updateData: any = {};
-    if (status !== undefined) {
-      updateData.status = status;
-    }
-    if (notes !== undefined) {
-      updateData.notes = notes;
-    }
-    if (isLocked !== undefined) {
-      updateData.isLocked = isLocked;
-    }
+    if (status !== undefined) updateData.status = status;
+    if (notes !== undefined) updateData.notes = notes;
+    if (isLocked !== undefined) updateData.isLocked = isLocked;
 
     if (status === 'APPROVED') {
       updateData.approvedAt = new Date();
@@ -174,13 +167,11 @@ export async function PUT(request: NextRequest) {
         data: { status: 'APPROVED' },
       });
     } else if (status === 'PAID') {
-      // Get the payroll period details
       const period = await prisma.payrollPeriod.findUnique({ where: { id } });
       if (!period) {
         return NextResponse.json({ error: 'Period not found' }, { status: 404 });
       }
 
-      // Get all payrolls with employee details
       const payrolls = await prisma.payroll.findMany({
         where: { payrollPeriodId: id },
         include: {
@@ -194,17 +185,12 @@ export async function PUT(request: NextRequest) {
         },
       });
 
-      // Process each payroll: generate payslip, save to documents, send notification
       for (const payroll of payrolls) {
         try {
-          // Generate payslip HTML
           const payslipHTML = generatePayslipHTML(payroll, period);
-          
-          // Upload to S3 and save to documents
           const fileName = `Payslip_${period.periodType}_${period.month}_${period.year}_${payroll.employee.employeeId}.html`;
           const cloudStoragePath = await uploadPayslipToS3(payslipHTML, fileName);
           
-          // Save document record
           await prisma.document.create({
             data: {
               employeeId: payroll.employeeId,
@@ -215,7 +201,6 @@ export async function PUT(request: NextRequest) {
             },
           });
 
-          // Send notification to employee
           if (payroll.employee.user) {
             const periodLabel = period.periodType === 'FIRST_HALF' 
               ? `1st Half (${getMonthName(period.month)} ${period.year})`
@@ -232,7 +217,6 @@ export async function PUT(request: NextRequest) {
             });
           }
 
-          // Record loan deductions as payments
           const totalLoanDeduction = payroll.salaryLoanDeduction + 
                                      payroll.computerLoanDeduction + 
                                      payroll.otherLoanDeductions;
@@ -280,7 +264,6 @@ export async function PUT(request: NextRequest) {
           }
         } catch (payrollError) {
           console.error(`Error processing payroll for employee ${payroll.employeeId}:`, payrollError);
-          // Continue processing other payrolls
         }
       }
 
@@ -306,7 +289,7 @@ export async function PUT(request: NextRequest) {
 export async function DELETE(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || !['ADMIN'].includes((session.user as any).role)) {
+    if (!session || !['ADMIN', 'SUPER_ADMIN'].includes((session.user as any).role)) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 

@@ -52,22 +52,15 @@ export async function PUT(
     }
 
     const role = (session.user as any)?.role;
-    if (role !== "ADMIN" && role !== "HR") {
+    if (role !== "ADMIN" && role !== "HR" && role !== "SUPER_ADMIN") {
       return NextResponse.json({ message: "Forbidden" }, { status: 403 });
     }
 
     const { id } = await params;
     const body = await request.json();
     const {
-      clockIn,
-      clockOut,
-      status,
-      lateMinutes,
-      undertimeMinutes,
-      overtimeMinutes,
-      nightDiffMinutes,
-      nightDiffOTMinutes,
-      notes,
+      clockIn, clockOut, status, lateMinutes, undertimeMinutes,
+      overtimeMinutes, nightDiffMinutes, nightDiffOTMinutes, notes,
     } = body;
 
     let totalHours: number | undefined = undefined;
@@ -121,14 +114,12 @@ export async function DELETE(
     }
 
     const role = (session.user as any)?.role;
-    if (role !== "ADMIN" && role !== "HR") {
+    if (role !== "ADMIN" && role !== "HR" && role !== "SUPER_ADMIN") {
       return NextResponse.json({ message: "Forbidden" }, { status: 403 });
     }
 
     const { id } = await params;
-    await prisma.attendance.delete({
-      where: { id },
-    });
+    await prisma.attendance.delete({ where: { id } });
 
     return NextResponse.json({ message: "Attendance deleted successfully" });
   } catch (error) {

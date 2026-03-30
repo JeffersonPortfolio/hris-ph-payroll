@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth-options";
 import { prisma } from "@/lib/db";
+import { getCompanyContext } from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
 
@@ -13,7 +14,15 @@ export async function GET() {
       return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
     }
 
+    const ctx = await getCompanyContext();
+
+    const where: any = {};
+    if (ctx?.companyId) {
+      where.OR = [{ companyId: ctx.companyId }, { companyId: null }];
+    }
+
     const configs = await prisma.leaveTypeConfig.findMany({
+      where,
       orderBy: { name: "asc" },
     });
 
@@ -33,10 +42,11 @@ export async function POST(request: Request) {
     }
 
     const role = (session.user as any)?.role;
-    if (role !== "ADMIN" && role !== "HR") {
+    if (role !== "ADMIN" && role !== "HR" && role !== "SUPER_ADMIN") {
       return NextResponse.json({ message: "Forbidden" }, { status: 403 });
     }
 
+    const ctx = await getCompanyContext();
     const body = await request.json();
     const { code, name, defaultBalance, description } = body;
 
@@ -44,8 +54,12 @@ export async function POST(request: Request) {
       return NextResponse.json({ message: "Code and name are required" }, { status: 400 });
     }
 
-    // Check if code already exists
-    const existing = await prisma.leaveTypeConfig.findUnique({ where: { code: code.toUpperCase() } });
+    // Check if code already exists for this company
+    const existingWhere: any = { code: code.toUpperCase() };
+    if (ctx?.companyId) {
+      existingWhere.companyId = ctx.companyId;
+    }
+    const existing = await prisma.leaveTypeConfig.findFirst({ where: existingWhere });
     if (existing) {
       return NextResponse.json({ message: "Leave type code already exists" }, { status: 409 });
     }
@@ -56,6 +70,7 @@ export async function POST(request: Request) {
         name,
         defaultBalance: parseFloat(defaultBalance) || 0,
         description: description || null,
+        companyId: ctx?.companyId || null,
       },
     });
 
@@ -75,7 +90,7 @@ export async function PUT(request: Request) {
     }
 
     const role = (session.user as any)?.role;
-    if (role !== "ADMIN" && role !== "HR") {
+    if (role !== "ADMIN" && role !== "HR" && role !== "SUPER_ADMIN") {
       return NextResponse.json({ message: "Forbidden" }, { status: 403 });
     }
 
@@ -112,7 +127,7 @@ export async function DELETE(request: Request) {
     }
 
     const role = (session.user as any)?.role;
-    if (role !== "ADMIN" && role !== "HR") {
+    if (role !== "ADMIN" && role !== "HR" && role !== "SUPER_ADMIN") {
       return NextResponse.json({ message: "Forbidden" }, { status: 403 });
     }
 

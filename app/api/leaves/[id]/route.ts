@@ -30,32 +30,21 @@ export async function PUT(
       where: { id },
       include: {
         employee: {
-          select: {
-            firstName: true,
-            lastName: true,
-            email: true,
-          },
+          select: { firstName: true, lastName: true, email: true },
         },
         approver: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-          },
+          select: { id: true, firstName: true, lastName: true },
         },
       },
     });
 
     if (!existingLeave) {
-      return NextResponse.json(
-        { message: "Leave not found" },
-        { status: 404 }
-      );
+      return NextResponse.json({ message: "Leave not found" }, { status: 404 });
     }
 
     // If only updating the approver (admin only)
     if (approverId !== undefined && !status) {
-      if (role !== "ADMIN" && role !== "HR") {
+      if (role !== "ADMIN" && role !== "HR" && role !== "SUPER_ADMIN") {
         return NextResponse.json({ message: "Forbidden" }, { status: 403 });
       }
 
@@ -64,11 +53,7 @@ export async function PUT(
         data: { approverId: approverId || null },
         include: {
           approver: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-            },
+            select: { id: true, firstName: true, lastName: true },
           },
         },
       });
@@ -77,7 +62,7 @@ export async function PUT(
     }
 
     // Check if user can approve/reject
-    const isAdminOrHR = role === "ADMIN" || role === "HR";
+    const isAdminOrHR = role === "ADMIN" || role === "HR" || role === "SUPER_ADMIN";
     const isAssignedApprover = existingLeave.approverId === sessionEmployeeId;
 
     if (!isAdminOrHR && !isAssignedApprover) {
@@ -85,17 +70,11 @@ export async function PUT(
     }
 
     if (!status || !["APPROVED", "REJECTED"].includes(status)) {
-      return NextResponse.json(
-        { message: "Invalid status" },
-        { status: 400 }
-      );
+      return NextResponse.json({ message: "Invalid status" }, { status: 400 });
     }
 
     if (existingLeave.status !== "PENDING") {
-      return NextResponse.json(
-        { message: "Leave already processed" },
-        { status: 400 }
-      );
+      return NextResponse.json({ message: "Leave already processed" }, { status: 400 });
     }
 
     const leave = await prisma.leave.update({
@@ -119,11 +98,7 @@ export async function PUT(
             year: currentYear,
           },
         },
-        data: {
-          used: {
-            increment: leave.totalDays,
-          },
-        },
+        data: { used: { increment: leave.totalDays } },
       });
     }
 
@@ -144,7 +119,6 @@ export async function PUT(
         ),
       });
 
-      // Create in-app notification
       const employee = await prisma.employee.findFirst({
         where: { email: existingLeave.employee.email },
         select: { userId: true },
@@ -166,10 +140,7 @@ export async function PUT(
     return NextResponse.json({ leave });
   } catch (error) {
     console.error("Update leave error:", error);
-    return NextResponse.json(
-      { message: "Internal server error" },
-      { status: 500 }
-    );
+    return NextResponse.json({ message: "Internal server error" }, { status: 500 });
   }
 }
 
@@ -187,39 +158,25 @@ export async function DELETE(
     const sessionEmployeeId = (session.user as any)?.employeeId;
     const role = (session.user as any)?.role;
 
-    const leave = await prisma.leave.findUnique({
-      where: { id },
-    });
+    const leave = await prisma.leave.findUnique({ where: { id } });
 
     if (!leave) {
-      return NextResponse.json(
-        { message: "Leave not found" },
-        { status: 404 }
-      );
+      return NextResponse.json({ message: "Leave not found" }, { status: 404 });
     }
 
-    // Only allow deletion if pending and by the employee who created it or admin
     if (leave.status !== "PENDING") {
-      return NextResponse.json(
-        { message: "Can only cancel pending leaves" },
-        { status: 400 }
-      );
+      return NextResponse.json({ message: "Can only cancel pending leaves" }, { status: 400 });
     }
 
     if (role === "EMPLOYEE" && leave.employeeId !== sessionEmployeeId) {
       return NextResponse.json({ message: "Forbidden" }, { status: 403 });
     }
 
-    await prisma.leave.delete({
-      where: { id },
-    });
+    await prisma.leave.delete({ where: { id } });
 
     return NextResponse.json({ message: "Leave cancelled successfully" });
   } catch (error) {
     console.error("Delete leave error:", error);
-    return NextResponse.json(
-      { message: "Internal server error" },
-      { status: 500 }
-    );
+    return NextResponse.json({ message: "Internal server error" }, { status: 500 });
   }
 }

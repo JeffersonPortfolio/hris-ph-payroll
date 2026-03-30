@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth-options";
 import { prisma } from "@/lib/db";
+import { getCompanyContext } from "@/lib/tenant";
 
 export async function GET() {
   try {
@@ -10,13 +11,18 @@ export async function GET() {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
+    const ctx = await getCompanyContext();
+
+    const where: any = { isActive: true };
+    if (ctx?.companyId) {
+      where.OR = [{ companyId: ctx.companyId }, { companyId: null }];
+    }
+
     const schedules = await prisma.workSchedule.findMany({
-      where: { isActive: true },
+      where,
       orderBy: { name: "asc" },
       include: {
-        _count: {
-          select: { employeeSchedules: true },
-        },
+        _count: { select: { employeeSchedules: true } },
       },
     });
 
@@ -30,64 +36,45 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || ((session.user as any)?.role !== "ADMIN" && (session.user as any)?.role !== "HR")) {
+    if (!session || !['ADMIN', 'HR', 'SUPER_ADMIN'].includes((session.user as any)?.role)) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
+    const ctx = await getCompanyContext();
+
     const body = await request.json();
     const {
-      name,
-      description,
-      mondayStart,
-      mondayEnd,
-      tuesdayStart,
-      tuesdayEnd,
-      wednesdayStart,
-      wednesdayEnd,
-      thursdayStart,
-      thursdayEnd,
-      fridayStart,
-      fridayEnd,
-      saturdayStart,
-      saturdayEnd,
-      sundayStart,
-      sundayEnd,
-      breakMinutes,
-      lateGracePeriod,
-      requiredHours,
-      isDefault,
+      name, description,
+      mondayStart, mondayEnd, tuesdayStart, tuesdayEnd,
+      wednesdayStart, wednesdayEnd, thursdayStart, thursdayEnd,
+      fridayStart, fridayEnd, saturdayStart, saturdayEnd,
+      sundayStart, sundayEnd,
+      breakMinutes, lateGracePeriod, requiredHours, isDefault,
     } = body;
 
-    // If this is default, remove default from others
     if (isDefault) {
+      const defaultWhere: any = { isDefault: true };
+      if (ctx?.companyId) {
+        defaultWhere.companyId = ctx.companyId;
+      }
       await prisma.workSchedule.updateMany({
-        where: { isDefault: true },
+        where: defaultWhere,
         data: { isDefault: false },
       });
     }
 
     const schedule = await prisma.workSchedule.create({
       data: {
-        name,
-        description,
-        mondayStart,
-        mondayEnd,
-        tuesdayStart,
-        tuesdayEnd,
-        wednesdayStart,
-        wednesdayEnd,
-        thursdayStart,
-        thursdayEnd,
-        fridayStart,
-        fridayEnd,
-        saturdayStart,
-        saturdayEnd,
-        sundayStart,
-        sundayEnd,
+        name, description,
+        mondayStart, mondayEnd, tuesdayStart, tuesdayEnd,
+        wednesdayStart, wednesdayEnd, thursdayStart, thursdayEnd,
+        fridayStart, fridayEnd, saturdayStart, saturdayEnd,
+        sundayStart, sundayEnd,
         breakMinutes: breakMinutes || 60,
         lateGracePeriod: lateGracePeriod || 0,
         requiredHours: requiredHours || 9,
         isDefault: isDefault || false,
+        companyId: ctx?.companyId || null,
       },
     });
 

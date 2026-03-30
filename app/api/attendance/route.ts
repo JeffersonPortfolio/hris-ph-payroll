@@ -3,6 +3,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth-options";
 import { prisma } from "@/lib/db";
 import { calculateWorkHoursDetailed } from "@/lib/utils";
+import { getCompanyContext } from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
 
@@ -10,6 +11,11 @@ export async function GET(request: Request) {
   try {
     const session = await getServerSession(authOptions);
     if (!session) {
+      return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
+    }
+
+    const ctx = await getCompanyContext();
+    if (!ctx) {
       return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
     }
 
@@ -21,14 +27,16 @@ export async function GET(request: Request) {
     const limit = parseInt(searchParams.get("limit") || "1000");
     const noPagination = searchParams.get("all") === "true";
 
-    const userRole = (session.user as any)?.role;
-    const sessionEmployeeId = (session.user as any)?.employeeId;
-
     const where: any = {};
 
+    // Tenant isolation: filter by company employees
+    if (ctx.companyId) {
+      where.employee = { companyId: ctx.companyId };
+    }
+
     // Employees can only see their own attendance
-    if (userRole === "EMPLOYEE") {
-      where.employeeId = sessionEmployeeId;
+    if (ctx.role === "EMPLOYEE") {
+      where.employeeId = ctx.employeeId;
     } else if (employeeId) {
       where.employeeId = employeeId;
     }
@@ -122,9 +130,11 @@ export async function POST(request: Request) {
     }
 
     const role = (session.user as any)?.role;
-    if (role !== "ADMIN" && role !== "HR") {
+    if (role !== "ADMIN" && role !== "HR" && role !== "SUPER_ADMIN") {
       return NextResponse.json({ message: "Forbidden" }, { status: 403 });
     }
+
+    const ctx = await getCompanyContext();
 
     const body = await request.json();
     const { 
@@ -166,12 +176,12 @@ export async function POST(request: Request) {
       );
     }
 
-    // Check if date is a holiday
-    const holiday = await prisma.holiday.findFirst({
-      where: {
-        date: new Date(date),
-      },
-    });
+    // Check if date is a holiday (company-specific)
+    const holidayWhere: any = { date: new Date(date) };
+    if (ctx?.companyId) {
+      holidayWhere.OR = [{ companyId: ctx.companyId }, { companyId: null }];
+    }
+    const holiday = await prisma.holiday.findFirst({ where: holidayWhere });
 
     let totalHours: number | undefined = undefined;
     let computedLate = 0;
@@ -184,7 +194,6 @@ export async function POST(request: Request) {
       computedLate = result.lateMinutes;
       computedUT = result.undertimeMinutes;
       computedOT = result.overtimeMinutes;
-      // Auto-determine status from computation
       if (result.lateMinutes > 0) computedStatus = "LATE";
     }
 
@@ -207,6 +216,7 @@ export async function POST(request: Request) {
         notes,
         isManualAdjust: isManualAdjust || true,
         adjustedById: (session.user as any)?.id,
+        companyId: ctx?.companyId || null,
       },
     });
 
@@ -228,7 +238,7 @@ export async function PUT(request: Request) {
     }
 
     const role = (session.user as any)?.role;
-    if (role !== "ADMIN" && role !== "HR") {
+    if (role !== "ADMIN" && role !== "HR" && role !== "SUPER_ADMIN") {
       return NextResponse.json({ message: "Forbidden" }, { status: 403 });
     }
 

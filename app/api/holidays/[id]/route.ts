@@ -14,9 +14,7 @@ export async function GET(
     }
 
     const { id } = await params;
-    const holiday = await prisma.holiday.findUnique({
-      where: { id },
-    });
+    const holiday = await prisma.holiday.findUnique({ where: { id } });
 
     if (!holiday) {
       return NextResponse.json({ error: "Holiday not found" }, { status: 404 });
@@ -35,7 +33,7 @@ export async function PUT(
 ) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || ((session.user as any)?.role !== "ADMIN" && (session.user as any)?.role !== "HR")) {
+    if (!session || !['ADMIN', 'HR', 'SUPER_ADMIN'].includes((session.user as any)?.role)) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -47,10 +45,7 @@ export async function PUT(
     const holiday = await prisma.holiday.update({
       where: { id },
       data: {
-        name,
-        date: holidayDate,
-        type,
-        description,
+        name, date: holidayDate, type, description,
         year: holidayDate ? holidayDate.getFullYear() : undefined,
         isRecurring,
       },
@@ -69,14 +64,12 @@ export async function DELETE(
 ) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || ((session.user as any)?.role !== "ADMIN" && (session.user as any)?.role !== "HR")) {
+    if (!session || !['ADMIN', 'HR', 'SUPER_ADMIN'].includes((session.user as any)?.role)) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     const { id } = await params;
-    await prisma.holiday.delete({
-      where: { id },
-    });
+    await prisma.holiday.delete({ where: { id } });
 
     return NextResponse.json({ message: "Holiday deleted successfully" });
   } catch (error) {

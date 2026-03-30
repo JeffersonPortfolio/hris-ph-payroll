@@ -3,6 +3,7 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth-options';
 import { prisma } from '@/lib/db';
 import { calculateWorkHoursDetailed } from '@/lib/utils';
+import { getCompanyContext } from '@/lib/tenant';
 
 export const dynamic = 'force-dynamic';
 
@@ -10,17 +11,19 @@ export const dynamic = 'force-dynamic';
 export async function POST(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || !['ADMIN', 'HR'].includes((session.user as any).role)) {
+    if (!session || !['ADMIN', 'HR', 'SUPER_ADMIN'].includes((session.user as any).role)) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
+    const ctx = await getCompanyContext();
+
     const body = await request.json();
     const {
-      date,          // "YYYY-MM-DD"
-      employeeIds,   // string[] — specific employees, or empty for all active
-      clockIn,       // "HH:mm" default "09:00"
-      clockOut,      // "HH:mm" default "18:00"
-      skipExisting,  // boolean — skip employees who already have attendance for the date
+      date,
+      employeeIds,
+      clockIn,
+      clockOut,
+      skipExisting,
     } = body;
 
     if (!date) {
@@ -31,23 +34,22 @@ export async function POST(request: NextRequest) {
     const clockInTime = clockIn || '09:00';
     const clockOutTime = clockOut || '18:00';
 
-    // Build clock-in and clock-out as proper UTC dates
     const [ciH, ciM] = clockInTime.split(':').map(Number);
     const [coH, coM] = clockOutTime.split(':').map(Number);
 
-    // Get employees to process
-    let employees;
-    if (employeeIds && employeeIds.length > 0) {
-      employees = await prisma.employee.findMany({
-        where: { id: { in: employeeIds }, isActive: true },
-        select: { id: true },
-      });
-    } else {
-      employees = await prisma.employee.findMany({
-        where: { isActive: true },
-        select: { id: true },
-      });
+    // Get employees with company filter
+    const empWhere: any = { isActive: true };
+    if (ctx?.companyId) {
+      empWhere.companyId = ctx.companyId;
     }
+    if (employeeIds && employeeIds.length > 0) {
+      empWhere.id = { in: employeeIds };
+    }
+
+    const employees = await prisma.employee.findMany({
+      where: empWhere,
+      select: { id: true },
+    });
 
     // Get existing attendance for the date to skip if needed
     const existingAttendance = await prisma.attendance.findMany({
@@ -59,6 +61,12 @@ export async function POST(request: NextRequest) {
     });
     const existingSet = new Set(existingAttendance.map((a: { employeeId: string }) => a.employeeId));
 
+    // Holiday check with company scope
+    const holidayWhere: any = { date: targetDate };
+    if (ctx?.companyId) {
+      holidayWhere.OR = [{ companyId: ctx.companyId }, { companyId: null }];
+    }
+
     let created = 0;
     let skipped = 0;
     let updated = 0;
@@ -69,22 +77,16 @@ export async function POST(request: NextRequest) {
         continue;
       }
 
-      // Build clock-in/out timestamps for this date
       const clockInDate = new Date(targetDate);
       clockInDate.setHours(ciH, ciM, 0, 0);
       const clockOutDate = new Date(targetDate);
       clockOutDate.setHours(coH, coM, 0, 0);
 
-      // Calculate work hours
       const result = calculateWorkHoursDetailed(clockInDate, clockOutDate);
 
-      // Check for holiday
-      const holiday = await prisma.holiday.findFirst({
-        where: { date: targetDate },
-      });
+      const holiday = await prisma.holiday.findFirst({ where: holidayWhere });
 
       if (existingSet.has(emp.id)) {
-        // Update existing record
         const existing = await prisma.attendance.findFirst({
           where: { employeeId: emp.id, date: targetDate },
         });
@@ -108,7 +110,6 @@ export async function POST(request: NextRequest) {
           updated++;
         }
       } else {
-        // Create new attendance
         await prisma.attendance.create({
           data: {
             employeeId: emp.id,
@@ -126,6 +127,7 @@ export async function POST(request: NextRequest) {
             isHoliday: !!holiday,
             holidayType: holiday?.type || null,
             holidayMultiplier: holiday?.type === 'REGULAR' ? 2.0 : holiday?.type === 'SPECIAL' ? 1.3 : 1.0,
+            companyId: ctx?.companyId || null,
           },
         });
         created++;

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth-options";
 import { prisma } from "@/lib/db";
+import { getCompanyContext } from "@/lib/tenant";
 
 export async function GET(
   request: Request,
@@ -13,9 +14,20 @@ export async function GET(
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
+    const ctx = await getCompanyContext();
+    if (!ctx) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const { id } = await params;
-    const schedule = await prisma.workSchedule.findUnique({
-      where: { id },
+
+    const where: any = { id };
+    if (ctx.companyId) {
+      where.OR = [{ companyId: ctx.companyId }, { companyId: null }];
+    }
+
+    const schedule = await prisma.workSchedule.findFirst({
+      where,
       include: {
         employeeSchedules: true,
       },
@@ -38,40 +50,41 @@ export async function PUT(
 ) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || ((session.user as any)?.role !== "ADMIN" && (session.user as any)?.role !== "HR")) {
+    if (!session || !['ADMIN', 'HR', 'SUPER_ADMIN'].includes((session.user as any)?.role)) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const ctx = await getCompanyContext();
+    if (!ctx) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     const { id } = await params;
+
+    // Verify ownership
+    if (ctx.companyId) {
+      const existing = await prisma.workSchedule.findFirst({
+        where: { id, OR: [{ companyId: ctx.companyId }, { companyId: null }] },
+      });
+      if (!existing) {
+        return NextResponse.json({ error: "Work schedule not found" }, { status: 404 });
+      }
+    }
+
     const body = await request.json();
     const {
-      name,
-      description,
-      mondayStart,
-      mondayEnd,
-      tuesdayStart,
-      tuesdayEnd,
-      wednesdayStart,
-      wednesdayEnd,
-      thursdayStart,
-      thursdayEnd,
-      fridayStart,
-      fridayEnd,
-      saturdayStart,
-      saturdayEnd,
-      sundayStart,
-      sundayEnd,
-      breakMinutes,
-      lateGracePeriod,
-      requiredHours,
-      isDefault,
-      isActive,
+      name, description, mondayStart, mondayEnd, tuesdayStart, tuesdayEnd,
+      wednesdayStart, wednesdayEnd, thursdayStart, thursdayEnd,
+      fridayStart, fridayEnd, saturdayStart, saturdayEnd, sundayStart, sundayEnd,
+      breakMinutes, lateGracePeriod, requiredHours, isDefault, isActive,
     } = body;
 
-    // If this is default, remove default from others
+    // If this is default, remove default from others in same company
     if (isDefault) {
+      const defaultWhere: any = { isDefault: true, id: { not: id } };
+      if (ctx.companyId) defaultWhere.companyId = ctx.companyId;
       await prisma.workSchedule.updateMany({
-        where: { isDefault: true, id: { not: id } },
+        where: defaultWhere,
         data: { isDefault: false },
       });
     }
@@ -79,27 +92,10 @@ export async function PUT(
     const schedule = await prisma.workSchedule.update({
       where: { id },
       data: {
-        name,
-        description,
-        mondayStart,
-        mondayEnd,
-        tuesdayStart,
-        tuesdayEnd,
-        wednesdayStart,
-        wednesdayEnd,
-        thursdayStart,
-        thursdayEnd,
-        fridayStart,
-        fridayEnd,
-        saturdayStart,
-        saturdayEnd,
-        sundayStart,
-        sundayEnd,
-        breakMinutes,
-        lateGracePeriod,
-        requiredHours,
-        isDefault,
-        isActive,
+        name, description, mondayStart, mondayEnd, tuesdayStart, tuesdayEnd,
+        wednesdayStart, wednesdayEnd, thursdayStart, thursdayEnd,
+        fridayStart, fridayEnd, saturdayStart, saturdayEnd, sundayStart, sundayEnd,
+        breakMinutes, lateGracePeriod, requiredHours, isDefault, isActive,
       },
     });
 
@@ -116,13 +112,27 @@ export async function DELETE(
 ) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || (session.user as any)?.role !== "ADMIN") {
+    if (!session || !['ADMIN', 'SUPER_ADMIN'].includes((session.user as any)?.role)) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const ctx = await getCompanyContext();
+    if (!ctx) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     const { id } = await params;
     
-    // Check if schedule has employees assigned
+    // Verify ownership
+    if (ctx.companyId) {
+      const existing = await prisma.workSchedule.findFirst({
+        where: { id, companyId: ctx.companyId },
+      });
+      if (!existing) {
+        return NextResponse.json({ error: "Work schedule not found" }, { status: 404 });
+      }
+    }
+
     const schedule = await prisma.workSchedule.findUnique({
       where: { id },
       include: {
@@ -139,9 +149,7 @@ export async function DELETE(
       );
     }
 
-    await prisma.workSchedule.delete({
-      where: { id },
-    });
+    await prisma.workSchedule.delete({ where: { id } });
 
     return NextResponse.json({ message: "Work schedule deleted successfully" });
   } catch (error) {

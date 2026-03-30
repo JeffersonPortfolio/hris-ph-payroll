@@ -3,6 +3,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth-options";
 import { prisma } from "@/lib/db";
 import { calculateLeaveDays, getLeaveTypeLabel, formatDate } from "@/lib/utils";
+import { getCompanyContext } from "@/lib/tenant";
 import {
   sendNotificationEmail,
   getLeaveSubmittedEmailTemplate,
@@ -17,6 +18,11 @@ export async function GET(request: Request) {
       return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
     }
 
+    const ctx = await getCompanyContext();
+    if (!ctx) {
+      return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
+    }
+
     const { searchParams } = new URL(request.url);
     const employeeId = searchParams.get("employeeId");
     const status = searchParams.get("status");
@@ -25,19 +31,20 @@ export async function GET(request: Request) {
     const limit = parseInt(searchParams.get("limit") || "20");
     const page = parseInt(searchParams.get("page") || "1");
 
-    const userRole = (session.user as any)?.role;
-    const sessionEmployeeId = (session.user as any)?.employeeId;
-
     const where: any = {};
 
+    // Tenant isolation: filter by company employees
+    if (ctx.companyId) {
+      where.employee = { companyId: ctx.companyId };
+    }
+
     // Employees can only see their own leaves
-    if (userRole === "EMPLOYEE") {
-      // If forApproval flag is set, show leaves they need to approve (as dept head)
-      if (forApproval === "true" && sessionEmployeeId) {
-        where.approverId = sessionEmployeeId;
+    if (ctx.role === "EMPLOYEE") {
+      if (forApproval === "true" && ctx.employeeId) {
+        where.approverId = ctx.employeeId;
         where.status = "PENDING";
       } else {
-        where.employeeId = sessionEmployeeId;
+        where.employeeId = ctx.employeeId;
       }
     } else if (employeeId) {
       where.employeeId = employeeId;
@@ -46,7 +53,6 @@ export async function GET(request: Request) {
     if (status && status !== "all") {
       where.status = status;
     }
-
     if (leaveType) {
       where.leaveType = leaveType;
     }
@@ -94,10 +100,7 @@ export async function GET(request: Request) {
     });
   } catch (error) {
     console.error("Get leaves error:", error);
-    return NextResponse.json(
-      { message: "Internal server error" },
-      { status: 500 }
-    );
+    return NextResponse.json({ message: "Internal server error" }, { status: 500 });
   }
 }
 
@@ -108,27 +111,17 @@ export async function POST(request: Request) {
       return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
     }
 
+    const ctx = await getCompanyContext();
+
     const {
-      employeeId,
-      leaveType,
-      filingType,
-      startDate,
-      endDate,
-      reason,
-      isHalfDay,
-      documentUrl,
-      documentName,
-      isPublicDoc,
+      employeeId, leaveType, filingType, startDate, endDate,
+      reason, isHalfDay, documentUrl, documentName, isPublicDoc,
     } = await request.json();
 
     if (!employeeId || !leaveType || !startDate || !endDate || !reason) {
-      return NextResponse.json(
-        { message: "Missing required fields" },
-        { status: 400 }
-      );
+      return NextResponse.json({ message: "Missing required fields" }, { status: 400 });
     }
 
-    // Sick leave requires attachment
     if (leaveType === "SICK" && !documentUrl) {
       return NextResponse.json(
         { message: "Sick leave requires a supporting document/medical certificate" },
@@ -145,12 +138,7 @@ export async function POST(request: Request) {
       where: {
         employeeId,
         status: "APPROVED",
-        OR: [
-          {
-            startDate: { lte: end },
-            endDate: { gte: start },
-          },
-        ],
+        OR: [{ startDate: { lte: end }, endDate: { gte: start } }],
       },
     });
 
@@ -165,11 +153,7 @@ export async function POST(request: Request) {
     const currentYear = new Date().getFullYear();
     const balance = await prisma.leaveBalance.findUnique({
       where: {
-        employeeId_leaveType_year: {
-          employeeId,
-          leaveType,
-          year: currentYear,
-        },
+        employeeId_leaveType_year: { employeeId, leaveType, year: currentYear },
       },
     });
 
@@ -188,16 +172,13 @@ export async function POST(request: Request) {
         department: {
           include: {
             head: {
-              include: {
-                user: { select: { email: true } },
-              },
+              include: { user: { select: { email: true } } },
             },
           },
         },
       },
     });
 
-    // Auto-assign department head as approver
     const approverId = employee?.department?.headId ?? null;
 
     const leave = await prisma.leave.create({
@@ -225,10 +206,7 @@ export async function POST(request: Request) {
           },
         },
         approver: {
-          select: {
-            firstName: true,
-            lastName: true,
-          },
+          select: { firstName: true, lastName: true },
         },
       },
     });
@@ -239,7 +217,6 @@ export async function POST(request: Request) {
     if (approverId && employee?.department?.head?.user?.email) {
       const approverEmail = employee.department.head.user.email;
       
-      // Send email to department head
       await sendNotificationEmail({
         to: approverEmail,
         subject: `Leave Request Pending Your Approval - ${employeeName}`,
@@ -252,7 +229,6 @@ export async function POST(request: Request) {
         ),
       });
 
-      // Create in-app notification for department head
       if (employee.department.head.userId) {
         await prisma.notification.create({
           data: {
@@ -265,12 +241,17 @@ export async function POST(request: Request) {
       }
     }
 
-    // Also notify HR/Admin about new leave request
+    // Also notify HR/Admin about new leave request - filtered by company
+    const hrWhere: any = {
+      role: { in: ["ADMIN", "HR"] },
+      isActive: true,
+    };
+    if (ctx?.companyId) {
+      hrWhere.companyId = ctx.companyId;
+    }
+
     const hrUsers = await prisma.user.findMany({
-      where: {
-        role: { in: ["ADMIN", "HR"] },
-        isActive: true,
-      },
+      where: hrWhere,
       select: { id: true, email: true },
     });
 
@@ -287,7 +268,6 @@ export async function POST(request: Request) {
         ),
       });
 
-      // Create in-app notification for HR/Admin
       await prisma.notification.create({
         data: {
           userId: hr.id,
@@ -301,9 +281,6 @@ export async function POST(request: Request) {
     return NextResponse.json({ leave }, { status: 201 });
   } catch (error) {
     console.error("Create leave error:", error);
-    return NextResponse.json(
-      { message: "Internal server error" },
-      { status: 500 }
-    );
+    return NextResponse.json({ message: "Internal server error" }, { status: 500 });
   }
 }

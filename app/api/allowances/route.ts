@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth-options';
 import { prisma } from '@/lib/db';
+import { getCompanyContext } from '@/lib/tenant';
 
 // GET all allowance types
 export async function GET() {
@@ -11,7 +12,22 @@ export async function GET() {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
+    const ctx = await getCompanyContext();
+    if (!ctx) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    // Show company-specific + global allowance types
+    const where: any = {};
+    if (ctx.companyId) {
+      where.OR = [
+        { companyId: ctx.companyId },
+        { companyId: null },
+      ];
+    }
+
     const allowanceTypes = await prisma.allowanceType.findMany({
+      where,
       orderBy: { name: 'asc' },
       include: {
         _count: {
@@ -31,7 +47,12 @@ export async function GET() {
 export async function POST(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || !['ADMIN', 'HR'].includes((session.user as any).role)) {
+    if (!session || !['ADMIN', 'HR', 'SUPER_ADMIN'].includes((session.user as any).role)) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const ctx = await getCompanyContext();
+    if (!ctx) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
@@ -43,6 +64,7 @@ export async function POST(request: NextRequest) {
         name,
         description,
         isTaxable: isTaxable ?? true,
+        companyId: ctx.companyId || null,
       },
     });
 
@@ -60,21 +82,31 @@ export async function POST(request: NextRequest) {
 export async function PUT(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || !['ADMIN', 'HR'].includes((session.user as any).role)) {
+    if (!session || !['ADMIN', 'HR', 'SUPER_ADMIN'].includes((session.user as any).role)) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const ctx = await getCompanyContext();
+    if (!ctx) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
     const body = await request.json();
     const { id, name, description, isTaxable, isActive } = body;
 
+    // Verify ownership
+    if (ctx.companyId) {
+      const existing = await prisma.allowanceType.findFirst({
+        where: { id, OR: [{ companyId: ctx.companyId }, { companyId: null }] },
+      });
+      if (!existing) {
+        return NextResponse.json({ error: 'Allowance type not found' }, { status: 404 });
+      }
+    }
+
     const allowanceType = await prisma.allowanceType.update({
       where: { id },
-      data: {
-        name,
-        description,
-        isTaxable,
-        isActive,
-      },
+      data: { name, description, isTaxable, isActive },
     });
 
     return NextResponse.json(allowanceType);
@@ -88,7 +120,12 @@ export async function PUT(request: NextRequest) {
 export async function DELETE(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || !['ADMIN', 'HR'].includes((session.user as any).role)) {
+    if (!session || !['ADMIN', 'HR', 'SUPER_ADMIN'].includes((session.user as any).role)) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const ctx = await getCompanyContext();
+    if (!ctx) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
@@ -99,9 +136,17 @@ export async function DELETE(request: NextRequest) {
       return NextResponse.json({ error: 'ID required' }, { status: 400 });
     }
 
-    await prisma.allowanceType.delete({
-      where: { id },
-    });
+    // Verify ownership
+    if (ctx.companyId) {
+      const existing = await prisma.allowanceType.findFirst({
+        where: { id, companyId: ctx.companyId },
+      });
+      if (!existing) {
+        return NextResponse.json({ error: 'Allowance type not found' }, { status: 404 });
+      }
+    }
+
+    await prisma.allowanceType.delete({ where: { id } });
 
     return NextResponse.json({ success: true });
   } catch (error) {

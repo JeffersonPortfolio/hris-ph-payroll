@@ -14,6 +14,7 @@ export async function GET() {
 
     const userId = (session.user as any)?.id;
 
+    // Notifications are already user-scoped, no additional company filter needed
     const notifications = await prisma.notification.findMany({
       where: { userId },
       orderBy: { createdAt: "desc" },

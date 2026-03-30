@@ -4,6 +4,7 @@ import { authOptions } from "@/lib/auth-options";
 import { prisma } from "@/lib/db";
 import crypto from "crypto";
 import { sendNotificationEmail, getPasswordResetEmailTemplate } from "@/lib/email";
+import { getCompanyContext } from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
 
@@ -18,13 +19,20 @@ export async function POST(
     }
 
     const userRole = (session.user as any)?.role;
-    if (userRole !== "ADMIN") {
+    if (userRole !== "ADMIN" && userRole !== "SUPER_ADMIN") {
       return NextResponse.json({ message: "Forbidden" }, { status: 403 });
     }
 
-    const user = await prisma.user.findUnique({
-      where: { id: params.id },
-    });
+    const ctx = await getCompanyContext();
+    if (!ctx) {
+      return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
+    }
+
+    // Verify user belongs to same company
+    const userWhere: any = { id: params.id };
+    if (ctx.companyId) userWhere.companyId = ctx.companyId;
+
+    const user = await prisma.user.findFirst({ where: userWhere });
 
     if (!user) {
       return NextResponse.json({ message: "User not found" }, { status: 404 });

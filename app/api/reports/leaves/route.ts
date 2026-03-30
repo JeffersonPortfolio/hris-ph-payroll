@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth-options";
 import { prisma } from "@/lib/db";
+import { getCompanyContext } from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
 
@@ -13,8 +14,13 @@ export async function GET(request: Request) {
     }
 
     const userRole = (session.user as any)?.role;
-    if (userRole !== "ADMIN" && userRole !== "HR") {
+    if (userRole !== "ADMIN" && userRole !== "HR" && userRole !== "SUPER_ADMIN") {
       return NextResponse.json({ message: "Forbidden" }, { status: 403 });
+    }
+
+    const ctx = await getCompanyContext();
+    if (!ctx) {
+      return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
     }
 
     const { searchParams } = new URL(request.url);
@@ -28,41 +34,33 @@ export async function GET(request: Request) {
 
     const where: any = {};
 
+    // Company filter through employee relation
+    if (ctx.companyId) {
+      where.employee = { companyId: ctx.companyId };
+    }
+
     if (employeeId && employeeId !== "all") {
       where.employeeId = employeeId;
     }
 
     if (departmentId && departmentId !== "all") {
       where.employee = {
+        ...where.employee,
         departmentId: departmentId,
       };
     }
 
     if (startDate) {
-      where.startDate = {
-        ...where.startDate,
-        gte: new Date(startDate),
-      };
+      where.startDate = { ...where.startDate, gte: new Date(startDate) };
     }
 
     if (endDate) {
-      where.endDate = {
-        ...where.endDate,
-        lte: new Date(endDate),
-      };
+      where.endDate = { ...where.endDate, lte: new Date(endDate) };
     }
 
-    if (leaveType && leaveType !== "all") {
-      where.leaveType = leaveType;
-    }
-
-    if (filingType && filingType !== "all") {
-      where.filingType = filingType;
-    }
-
-    if (status && status !== "all") {
-      where.status = status;
-    }
+    if (leaveType && leaveType !== "all") where.leaveType = leaveType;
+    if (filingType && filingType !== "all") where.filingType = filingType;
+    if (status && status !== "all") where.status = status;
 
     const leaves = await prisma.leave.findMany({
       where,
@@ -89,7 +87,6 @@ export async function GET(request: Request) {
       ],
     });
 
-    // Calculate summary statistics
     const summary = {
       totalLeaves: leaves.length,
       totalDays: leaves.reduce((sum, l) => sum + (l.totalDays || 0), 0),
@@ -111,7 +108,6 @@ export async function GET(request: Request) {
       },
     };
 
-    // Group leaves by employee for the report
     const employeeLeaves: Record<string, any> = {};
     leaves.forEach((leave) => {
       const empId = leave.employee?.id || "unknown";
@@ -120,22 +116,9 @@ export async function GET(request: Request) {
           employee: leave.employee,
           leaves: [],
           totalDays: 0,
-          byType: {
-            ANNUAL: 0,
-            SICK: 0,
-            EMERGENCY: 0,
-            WFH: 0,
-            COMPASSIONATE: 0,
-          },
-          byFilingType: {
-            ADVANCE: 0,
-            URGENT: 0,
-          },
-          byStatus: {
-            PENDING: 0,
-            APPROVED: 0,
-            REJECTED: 0,
-          },
+          byType: { ANNUAL: 0, SICK: 0, EMERGENCY: 0, WFH: 0, COMPASSIONATE: 0 },
+          byFilingType: { ADVANCE: 0, URGENT: 0 },
+          byStatus: { PENDING: 0, APPROVED: 0, REJECTED: 0 },
         };
       }
       employeeLeaves[empId].leaves.push(leave);

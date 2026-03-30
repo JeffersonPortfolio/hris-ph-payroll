@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth-options';
 import { prisma } from '@/lib/db';
+import { getCompanyContext } from '@/lib/tenant';
 
 export async function GET(
   request: NextRequest,
@@ -13,13 +14,26 @@ export async function GET(
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
+    const ctx = await getCompanyContext();
+    if (!ctx) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
     const { employeeId } = await params;
+
+    // Verify employee belongs to company
+    if (ctx.companyId) {
+      const employee = await prisma.employee.findFirst({
+        where: { id: employeeId, companyId: ctx.companyId },
+      });
+      if (!employee) {
+        return NextResponse.json({ error: 'Employee not found' }, { status: 404 });
+      }
+    }
 
     const schedules = await prisma.employeeSchedule.findMany({
       where: { employeeId },
-      include: {
-        workSchedule: true,
-      },
+      include: { workSchedule: true },
       orderBy: { effectiveFrom: 'desc' },
     });
 
@@ -36,7 +50,12 @@ export async function DELETE(
 ) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || !['ADMIN', 'HR'].includes((session.user as any).role)) {
+    if (!session || !['ADMIN', 'HR', 'SUPER_ADMIN'].includes((session.user as any).role)) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const ctx = await getCompanyContext();
+    if (!ctx) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
@@ -46,6 +65,16 @@ export async function DELETE(
 
     if (!scheduleId) {
       return NextResponse.json({ error: 'Schedule ID required' }, { status: 400 });
+    }
+
+    // Verify employee belongs to company
+    if (ctx.companyId) {
+      const employee = await prisma.employee.findFirst({
+        where: { id: employeeId, companyId: ctx.companyId },
+      });
+      if (!employee) {
+        return NextResponse.json({ error: 'Employee not found' }, { status: 404 });
+      }
     }
 
     await prisma.employeeSchedule.delete({
@@ -65,7 +94,12 @@ export async function POST(
 ) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || !['ADMIN', 'HR'].includes((session.user as any).role)) {
+    if (!session || !['ADMIN', 'HR', 'SUPER_ADMIN'].includes((session.user as any).role)) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const ctx = await getCompanyContext();
+    if (!ctx) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
@@ -73,13 +107,15 @@ export async function POST(
     const body = await request.json();
     const { workScheduleId, effectiveFrom, effectiveTo } = body;
 
-    // Check if employee exists
-    const employee = await prisma.employee.findUnique({ where: { id: employeeId } });
+    // Verify employee belongs to company
+    const empWhere: any = { id: employeeId };
+    if (ctx.companyId) empWhere.companyId = ctx.companyId;
+
+    const employee = await prisma.employee.findFirst({ where: empWhere });
     if (!employee) {
       return NextResponse.json({ error: 'Employee not found' }, { status: 404 });
     }
 
-    // Check if work schedule exists
     const workSchedule = await prisma.workSchedule.findUnique({ where: { id: workScheduleId } });
     if (!workSchedule) {
       return NextResponse.json({ error: 'Work schedule not found' }, { status: 404 });
@@ -87,16 +123,10 @@ export async function POST(
 
     // End any existing active schedules
     await prisma.employeeSchedule.updateMany({
-      where: {
-        employeeId,
-        effectiveTo: null,
-      },
-      data: {
-        effectiveTo: new Date(effectiveFrom),
-      },
+      where: { employeeId, effectiveTo: null },
+      data: { effectiveTo: new Date(effectiveFrom) },
     });
 
-    // Create new schedule assignment
     const schedule = await prisma.employeeSchedule.create({
       data: {
         employeeId,
@@ -104,9 +134,7 @@ export async function POST(
         effectiveFrom: new Date(effectiveFrom),
         effectiveTo: effectiveTo ? new Date(effectiveTo) : null,
       },
-      include: {
-        workSchedule: true,
-      },
+      include: { workSchedule: true },
     });
 
     return NextResponse.json({ schedule });

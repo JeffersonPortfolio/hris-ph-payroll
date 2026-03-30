@@ -15,7 +15,17 @@ export async function PUT(
       return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
     }
 
+    const userId = (session.user as any)?.id;
     const { isRead } = await request.json();
+
+    // Only allow updating own notifications
+    const notification = await prisma.notification.findFirst({
+      where: { id: params.id, userId },
+    });
+
+    if (!notification) {
+      return NextResponse.json({ message: "Notification not found" }, { status: 404 });
+    }
 
     await prisma.notification.update({
       where: { id: params.id },

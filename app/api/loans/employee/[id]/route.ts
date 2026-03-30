@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth-options';
 import { prisma } from '@/lib/db';
+import { getCompanyContext } from '@/lib/tenant';
 
 // GET single loan detail
 export async function GET(
@@ -11,6 +12,11 @@ export async function GET(
   try {
     const session = await getServerSession(authOptions);
     if (!session) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const ctx = await getCompanyContext();
+    if (!ctx) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
@@ -29,6 +35,7 @@ export async function GET(
             middleName: true,
             employeeId: true,
             email: true,
+            companyId: true,
             department: { select: { name: true } },
             role: { select: { name: true } },
           },
@@ -37,6 +44,11 @@ export async function GET(
     });
 
     if (!loan) {
+      return NextResponse.json({ error: 'Loan not found' }, { status: 404 });
+    }
+
+    // Verify company access
+    if (ctx.companyId && loan.employee?.companyId !== ctx.companyId) {
       return NextResponse.json({ error: 'Loan not found' }, { status: 404 });
     }
 
@@ -54,20 +66,27 @@ export async function PUT(
 ) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || !['ADMIN', 'HR'].includes((session.user as any).role)) {
+    if (!session || !['ADMIN', 'HR', 'SUPER_ADMIN'].includes((session.user as any).role)) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
+    const ctx = await getCompanyContext();
+    if (!ctx) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    // Verify ownership
+    if (ctx.companyId) {
+      const existing = await prisma.employeeLoan.findFirst({
+        where: { id: params.id, employee: { companyId: ctx.companyId } },
+      });
+      if (!existing) {
+        return NextResponse.json({ error: 'Loan not found' }, { status: 404 });
+      }
+    }
+
     const body = await request.json();
-    const {
-      applicationDate,
-      loanDate,
-      referenceNumber,
-      firstAmortizationDate,
-      payrollCutoff,
-      remarks,
-      notes,
-    } = body;
+    const { applicationDate, loanDate, referenceNumber, firstAmortizationDate, payrollCutoff, remarks, notes } = body;
 
     const loan = await prisma.employeeLoan.update({
       where: { id: params.id },
@@ -110,8 +129,23 @@ export async function PATCH(
 ) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || !['ADMIN', 'HR'].includes((session.user as any).role)) {
+    if (!session || !['ADMIN', 'HR', 'SUPER_ADMIN'].includes((session.user as any).role)) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const ctx = await getCompanyContext();
+    if (!ctx) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    // Verify ownership
+    if (ctx.companyId) {
+      const existing = await prisma.employeeLoan.findFirst({
+        where: { id: params.id, employee: { companyId: ctx.companyId } },
+      });
+      if (!existing) {
+        return NextResponse.json({ error: 'Loan not found' }, { status: 404 });
+      }
     }
 
     const body = await request.json();
@@ -129,7 +163,6 @@ export async function PATCH(
     }
 
     if (action === 'updateAmounts') {
-      // Update individual payment amounts: body.payments = [{ id, amount }]
       const { payments } = body;
       if (!payments || !Array.isArray(payments)) {
         return NextResponse.json({ error: 'Invalid payments data' }, { status: 400 });
@@ -144,7 +177,6 @@ export async function PATCH(
         )
       );
 
-      // Recalculate loan totals
       const allPayments = await prisma.loanPayment.findMany({
         where: { employeeLoanId: params.id },
       });
@@ -186,7 +218,6 @@ export async function PATCH(
         }),
       ]);
 
-      // Check if fully paid
       const loan = await prisma.employeeLoan.findUnique({ where: { id: params.id } });
       if (loan && loan.remainingBalance <= 0) {
         await prisma.employeeLoan.update({

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth-options";
 import { prisma } from "@/lib/db";
+import { getCompanyContext } from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
 
@@ -18,6 +19,21 @@ export async function PUT(
     const userRole = (session.user as any)?.role;
     if (userRole !== "ADMIN" && userRole !== "SUPER_ADMIN") {
       return NextResponse.json({ message: "Forbidden" }, { status: 403 });
+    }
+
+    const ctx = await getCompanyContext();
+    if (!ctx) {
+      return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
+    }
+
+    // Verify user belongs to same company
+    if (ctx.companyId) {
+      const targetUser = await prisma.user.findFirst({
+        where: { id: params.id, companyId: ctx.companyId },
+      });
+      if (!targetUser) {
+        return NextResponse.json({ message: "User not found" }, { status: 404 });
+      }
     }
 
     const { role, isActive } = await request.json();

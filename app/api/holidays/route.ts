@@ -2,10 +2,10 @@ import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth-options";
 import { prisma } from "@/lib/db";
+import { getCompanyContext } from "@/lib/tenant";
 
 // Singapore Public Holidays 2024-2026
 const SINGAPORE_HOLIDAYS = [
-  // 2024
   { name: "New Year's Day", date: "2024-01-01", type: "REGULAR" },
   { name: "Chinese New Year", date: "2024-02-10", type: "REGULAR" },
   { name: "Chinese New Year (Day 2)", date: "2024-02-11", type: "REGULAR" },
@@ -17,7 +17,6 @@ const SINGAPORE_HOLIDAYS = [
   { name: "National Day", date: "2024-08-09", type: "REGULAR" },
   { name: "Deepavali", date: "2024-11-01", type: "REGULAR" },
   { name: "Christmas Day", date: "2024-12-25", type: "REGULAR" },
-  // 2025
   { name: "New Year's Day", date: "2025-01-01", type: "REGULAR" },
   { name: "Chinese New Year", date: "2025-01-29", type: "REGULAR" },
   { name: "Chinese New Year (Day 2)", date: "2025-01-30", type: "REGULAR" },
@@ -29,7 +28,6 @@ const SINGAPORE_HOLIDAYS = [
   { name: "National Day", date: "2025-08-09", type: "REGULAR" },
   { name: "Deepavali", date: "2025-10-20", type: "REGULAR" },
   { name: "Christmas Day", date: "2025-12-25", type: "REGULAR" },
-  // 2026
   { name: "New Year's Day", date: "2026-01-01", type: "REGULAR" },
   { name: "Chinese New Year", date: "2026-02-17", type: "REGULAR" },
   { name: "Chinese New Year (Day 2)", date: "2026-02-18", type: "REGULAR" },
@@ -50,6 +48,8 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
+    const ctx = await getCompanyContext();
+
     const { searchParams } = new URL(request.url);
     const year = searchParams.get("year");
     const month = searchParams.get("month");
@@ -58,22 +58,21 @@ export async function GET(request: Request) {
 
     const where: Record<string, unknown> = {};
     
-    // Support date range queries (for cutoff periods)
+    // Tenant isolation: show company-specific + global holidays
+    if (ctx?.companyId) {
+      where.OR = [{ companyId: ctx.companyId }, { companyId: null }];
+    }
+
     if (startDateParam && endDateParam) {
-      where.date = {
-        gte: new Date(startDateParam),
-        lte: new Date(endDateParam),
-      };
+      where.date = { gte: new Date(startDateParam), lte: new Date(endDateParam) };
     } else if (year) {
       where.year = parseInt(year);
       if (month) {
         const monthNum = parseInt(month);
         const yearNum = parseInt(year);
-        const startDate = new Date(yearNum, monthNum - 1, 1);
-        const endDate = new Date(yearNum, monthNum, 0);
         where.date = {
-          gte: startDate,
-          lte: endDate,
+          gte: new Date(yearNum, monthNum - 1, 1),
+          lte: new Date(yearNum, monthNum, 0),
         };
       }
     }
@@ -93,14 +92,14 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || ((session.user as any)?.role !== "ADMIN" && (session.user as any)?.role !== "HR")) {
+    if (!session || !['ADMIN', 'HR', 'SUPER_ADMIN'].includes((session.user as any)?.role)) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
+    const ctx = await getCompanyContext();
     const body = await request.json();
     const { name, date, type, description, isRecurring, importSingapore, year } = body;
 
-    // Import Singapore holidays
     if (importSingapore && year) {
       const singaporeHolidays = SINGAPORE_HOLIDAYS.filter(h => h.date.startsWith(year.toString()));
       const created = [];
@@ -108,10 +107,7 @@ export async function POST(request: Request) {
         try {
           const holidayDate = new Date(holiday.date);
           const existing = await prisma.holiday.findFirst({
-            where: {
-              date: holidayDate,
-              name: holiday.name,
-            },
+            where: { date: holidayDate, name: holiday.name, companyId: ctx?.companyId || null },
           });
           if (!existing) {
             const newHoliday = await prisma.holiday.create({
@@ -121,18 +117,16 @@ export async function POST(request: Request) {
                 type: holiday.type as "REGULAR" | "SPECIAL",
                 year: parseInt(year),
                 isRecurring: false,
+                companyId: ctx?.companyId || null,
               },
             });
             created.push(newHoliday);
           }
-        } catch {
-          // Skip if already exists
-        }
+        } catch { /* Skip if already exists */ }
       }
       return NextResponse.json({ message: `Imported ${created.length} Singapore holidays for ${year}`, holidays: created });
     }
 
-    // Create single holiday
     const holidayDate = new Date(date);
     const holiday = await prisma.holiday.create({
       data: {
@@ -142,6 +136,7 @@ export async function POST(request: Request) {
         description,
         year: holidayDate.getFullYear(),
         isRecurring: isRecurring || false,
+        companyId: ctx?.companyId || null,
       },
     });
 

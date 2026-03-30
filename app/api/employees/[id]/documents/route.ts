@@ -3,6 +3,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth-options";
 import { prisma } from "@/lib/db";
 import { deleteFile, getFileUrl } from "@/lib/s3";
+import { getCompanyContext } from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
 
@@ -14,6 +15,21 @@ export async function POST(
     const session = await getServerSession(authOptions);
     if (!session) {
       return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
+    }
+
+    const ctx = await getCompanyContext();
+    if (!ctx) {
+      return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
+    }
+
+    // Verify employee belongs to company
+    if (ctx.companyId) {
+      const employee = await prisma.employee.findFirst({
+        where: { id: params.id, companyId: ctx.companyId },
+      });
+      if (!employee) {
+        return NextResponse.json({ message: "Employee not found" }, { status: 404 });
+      }
     }
 
     const { name, type, cloudStoragePath, size } = await request.json();
@@ -56,8 +72,23 @@ export async function DELETE(
     }
 
     const role = (session.user as any)?.role;
-    if (role !== "ADMIN" && role !== "HR") {
+    if (!['ADMIN', 'HR', 'SUPER_ADMIN'].includes(role)) {
       return NextResponse.json({ message: "Forbidden" }, { status: 403 });
+    }
+
+    const ctx = await getCompanyContext();
+    if (!ctx) {
+      return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
+    }
+
+    // Verify employee belongs to company
+    if (ctx.companyId) {
+      const employee = await prisma.employee.findFirst({
+        where: { id: params.id, companyId: ctx.companyId },
+      });
+      if (!employee) {
+        return NextResponse.json({ message: "Employee not found" }, { status: 404 });
+      }
     }
 
     const { searchParams } = new URL(request.url);
@@ -81,13 +112,8 @@ export async function DELETE(
       );
     }
 
-    // Delete from S3
     await deleteFile(document.cloudStoragePath);
-
-    // Delete from database
-    await prisma.document.delete({
-      where: { id: documentId },
-    });
+    await prisma.document.delete({ where: { id: documentId } });
 
     return NextResponse.json({ message: "Document deleted successfully" });
   } catch (error) {

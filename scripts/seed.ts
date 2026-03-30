@@ -183,31 +183,50 @@ async function main() {
   console.log("Company 2 admin created:", company2Admin.email, "-> Company:", company2.name);
 
   // ==================== SHARED DATA (loan types, allowance types, etc.) ====================
-  await Promise.all([
-    prisma.loanType.upsert({ where: { name: "SSS Salary Loan" }, update: {}, create: { name: "SSS Salary Loan", description: "SSS salary loan", maxTermMonths: 24, interestRate: 10 } }),
-    prisma.loanType.upsert({ where: { name: "SSS Calamity Loan" }, update: {}, create: { name: "SSS Calamity Loan", description: "SSS calamity loan", maxTermMonths: 24, interestRate: 10 } }),
-    prisma.loanType.upsert({ where: { name: "Pag-IBIG Multi-Purpose Loan" }, update: {}, create: { name: "Pag-IBIG Multi-Purpose Loan", description: "Pag-IBIG MPL", maxTermMonths: 24, interestRate: 10.5 } }),
-    prisma.loanType.upsert({ where: { name: "Computer/Laptop Loan" }, update: {}, create: { name: "Computer/Laptop Loan", description: "Company equipment loan", maxTermMonths: 12, interestRate: 0 } }),
-    prisma.loanType.upsert({ where: { name: "Company Cash Advance" }, update: {}, create: { name: "Company Cash Advance", description: "Cash advance from company", maxTermMonths: 6, interestRate: 0 } }),
-  ]);
+  // Global (companyId: null) shared data - use compound unique keys
+  const loanTypes = [
+    { name: "SSS Salary Loan", description: "SSS salary loan", maxTermMonths: 24, interestRate: 10 },
+    { name: "SSS Calamity Loan", description: "SSS calamity loan", maxTermMonths: 24, interestRate: 10 },
+    { name: "Pag-IBIG Multi-Purpose Loan", description: "Pag-IBIG MPL", maxTermMonths: 24, interestRate: 10.5 },
+    { name: "Computer/Laptop Loan", description: "Company equipment loan", maxTermMonths: 12, interestRate: 0 },
+    { name: "Company Cash Advance", description: "Cash advance from company", maxTermMonths: 6, interestRate: 0 },
+  ];
+  for (const lt of loanTypes) {
+    const existing = await prisma.loanType.findFirst({ where: { name: lt.name, companyId: null } });
+    if (!existing) {
+      await prisma.loanType.create({ data: lt });
+    }
+  }
   console.log("Loan types created");
 
-  await Promise.all([
-    prisma.allowanceType.upsert({ where: { name: "Mobile/Load Allowance" }, update: {}, create: { name: "Mobile/Load Allowance", description: "Monthly mobile phone allowance", isTaxable: false } }),
-    prisma.allowanceType.upsert({ where: { name: "Meal Allowance" }, update: {}, create: { name: "Meal Allowance", description: "Daily meal allowance", isTaxable: false } }),
-    prisma.allowanceType.upsert({ where: { name: "Transportation Allowance" }, update: {}, create: { name: "Transportation Allowance", description: "Monthly transportation allowance", isTaxable: false } }),
-    prisma.allowanceType.upsert({ where: { name: "Performance Pay" }, update: {}, create: { name: "Performance Pay", description: "Performance-based bonus", isTaxable: true } }),
-    prisma.allowanceType.upsert({ where: { name: "Rice Subsidy" }, update: {}, create: { name: "Rice Subsidy", description: "Monthly rice subsidy", isTaxable: false } }),
-  ]);
+  const allowanceTypes = [
+    { name: "Mobile/Load Allowance", description: "Monthly mobile phone allowance", isTaxable: false },
+    { name: "Meal Allowance", description: "Daily meal allowance", isTaxable: false },
+    { name: "Transportation Allowance", description: "Monthly transportation allowance", isTaxable: false },
+    { name: "Performance Pay", description: "Performance-based bonus", isTaxable: true },
+    { name: "Rice Subsidy", description: "Monthly rice subsidy", isTaxable: false },
+  ];
+  for (const at of allowanceTypes) {
+    const existing = await prisma.allowanceType.findFirst({ where: { name: at.name, companyId: null } });
+    if (!existing) {
+      await prisma.allowanceType.create({ data: at });
+    }
+  }
   console.log("Allowance types created");
 
-  await Promise.all([
-    prisma.leaveTypeConfig.upsert({ where: { code: "ANNUAL" }, update: {}, create: { code: "ANNUAL", name: "Annual Leave", defaultBalance: 15, description: "Vacation/Annual leave" } }),
-    prisma.leaveTypeConfig.upsert({ where: { code: "SICK" }, update: {}, create: { code: "SICK", name: "Sick Leave", defaultBalance: 15, description: "Sick leave" } }),
-    prisma.leaveTypeConfig.upsert({ where: { code: "EMERGENCY" }, update: {}, create: { code: "EMERGENCY", name: "Emergency Leave", defaultBalance: 5, description: "Emergency leave" } }),
-    prisma.leaveTypeConfig.upsert({ where: { code: "WFH" }, update: {}, create: { code: "WFH", name: "Work From Home", defaultBalance: 30, description: "Work from home" } }),
-    prisma.leaveTypeConfig.upsert({ where: { code: "COMPASSIONATE" }, update: {}, create: { code: "COMPASSIONATE", name: "Compassionate Leave", defaultBalance: 5, description: "Bereavement/compassionate leave" } }),
-  ]);
+  const leaveConfigs = [
+    { code: "ANNUAL", name: "Annual Leave", defaultBalance: 15, description: "Vacation/Annual leave" },
+    { code: "SICK", name: "Sick Leave", defaultBalance: 15, description: "Sick leave" },
+    { code: "EMERGENCY", name: "Emergency Leave", defaultBalance: 5, description: "Emergency leave" },
+    { code: "WFH", name: "Work From Home", defaultBalance: 30, description: "Work from home" },
+    { code: "COMPASSIONATE", name: "Compassionate Leave", defaultBalance: 5, description: "Bereavement/compassionate leave" },
+  ];
+  for (const lc of leaveConfigs) {
+    const existing = await prisma.leaveTypeConfig.findFirst({ where: { code: lc.code, companyId: null } });
+    if (!existing) {
+      await prisma.leaveTypeConfig.create({ data: lc });
+    }
+  }
   console.log("Leave type configs created");
 
   const defaultSettings = [
@@ -222,11 +241,10 @@ async function main() {
   ];
 
   for (const setting of defaultSettings) {
-    await prisma.systemSettings.upsert({
-      where: { key: setting.key },
-      update: {},
-      create: setting,
-    });
+    const existing = await prisma.systemSettings.findFirst({ where: { key: setting.key, companyId: null } });
+    if (!existing) {
+      await prisma.systemSettings.create({ data: setting });
+    }
   }
   console.log("System settings created");
 

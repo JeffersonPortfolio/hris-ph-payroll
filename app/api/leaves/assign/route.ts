@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth-options";
 import { prisma } from "@/lib/db";
+import { getCompanyContext } from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
 
@@ -14,10 +15,11 @@ export async function POST(request: Request) {
     }
 
     const role = (session.user as any)?.role;
-    if (role !== "ADMIN" && role !== "HR") {
+    if (role !== "ADMIN" && role !== "HR" && role !== "SUPER_ADMIN") {
       return NextResponse.json({ message: "Forbidden" }, { status: 403 });
     }
 
+    const ctx = await getCompanyContext();
     const body = await request.json();
     const { employeeIds, leaveTypeConfigIds, year, overwrite } = body;
 
@@ -30,10 +32,9 @@ export async function POST(request: Request) {
 
     const currentYear = year || new Date().getFullYear();
 
-    // Fetch selected leave type configs
-    const configs = await prisma.leaveTypeConfig.findMany({
-      where: { id: { in: leaveTypeConfigIds }, isActive: true },
-    });
+    // Fetch selected leave type configs (company-scoped)
+    const configWhere: any = { id: { in: leaveTypeConfigIds }, isActive: true };
+    const configs = await prisma.leaveTypeConfig.findMany({ where: configWhere });
 
     if (configs.length === 0) {
       return NextResponse.json({ message: "No active leave type configs found" }, { status: 400 });
@@ -45,7 +46,6 @@ export async function POST(request: Request) {
 
     for (const empId of employeeIds) {
       for (const config of configs) {
-        // Check if LeaveType enum has this code
         const validLeaveTypes = ["ANNUAL", "SICK", "EMERGENCY", "WFH", "COMPASSIONATE"];
         if (!validLeaveTypes.includes(config.code)) {
           skipped++;
@@ -89,9 +89,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       message: `Assigned leave balances: ${created} created, ${updated} updated, ${skipped} skipped`,
-      created,
-      updated,
-      skipped,
+      created, updated, skipped,
     });
   } catch (error) {
     console.error("Leave assign error:", error);

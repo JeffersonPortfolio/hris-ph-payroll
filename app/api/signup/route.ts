@@ -6,7 +6,7 @@ export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
   try {
-    const { email, password, name } = await request.json();
+    const { email, password, name, companyId } = await request.json();
 
     if (!email || !password || !name) {
       return NextResponse.json(
@@ -26,6 +26,19 @@ export async function POST(request: Request) {
       );
     }
 
+    // Verify company exists if provided
+    if (companyId) {
+      const company = await prisma.company.findUnique({
+        where: { id: companyId },
+      });
+      if (!company) {
+        return NextResponse.json(
+          { message: "Company not found" },
+          { status: 404 }
+        );
+      }
+    }
+
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const user = await prisma.user.create({
@@ -34,6 +47,7 @@ export async function POST(request: Request) {
         password: hashedPassword,
         name,
         role: "EMPLOYEE",
+        companyId: companyId || null,
       },
     });
 

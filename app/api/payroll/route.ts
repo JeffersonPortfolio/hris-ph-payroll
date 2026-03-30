@@ -3,12 +3,18 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth-options';
 import { prisma } from '@/lib/db';
 import { calculateSSS, calculatePhilHealth, calculatePagIbig, calculateWithholdingTax } from '@/lib/payroll-utils';
+import { getCompanyContext } from '@/lib/tenant';
 
 // GET payrolls
 export async function GET(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
     if (!session) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const ctx = await getCompanyContext();
+    if (!ctx) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
@@ -20,10 +26,13 @@ export async function GET(request: NextRequest) {
     if (periodId) where.payrollPeriodId = periodId;
     if (employeeId) where.employeeId = employeeId;
 
-    const role = (session.user as any).role;
-    if (!['ADMIN', 'HR', 'FINANCE'].includes(role)) {
-      const userEmployeeId = (session.user as any).employeeId;
-      if (userEmployeeId) where.employeeId = userEmployeeId;
+    // Tenant isolation via payroll period
+    if (ctx.companyId) {
+      where.payrollPeriod = { companyId: ctx.companyId };
+    }
+
+    if (!['ADMIN', 'HR', 'FINANCE', 'SUPER_ADMIN'].includes(ctx.role)) {
+      if (ctx.employeeId) where.employeeId = ctx.employeeId;
     }
 
     const payrolls = await prisma.payroll.findMany({
@@ -55,9 +64,11 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || !['ADMIN', 'HR'].includes((session.user as any).role)) {
+    if (!session || !['ADMIN', 'HR', 'SUPER_ADMIN'].includes((session.user as any).role)) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
+
+    const ctx = await getCompanyContext();
 
     const body = await request.json();
     const { periodId } = body;
@@ -73,25 +84,27 @@ export async function POST(request: NextRequest) {
       }, { status: 400 });
     }
 
-    const employees = await prisma.employee.findMany({ where: { isActive: true } });
+    // Get employees filtered by company
+    const empWhere: any = { isActive: true };
+    if (ctx?.companyId) {
+      empWhere.companyId = ctx.companyId;
+    }
+    const employees = await prisma.employee.findMany({ where: empWhere });
 
     const isFirstHalf = period.periodType === 'FIRST_HALF';
     const isSemiMonthly = ['FIRST_HALF', 'SECOND_HALF'].includes(period.periodType);
     const isMonthly = period.periodType === 'MONTHLY';
     const isBiWeekly = period.periodType === 'BI_WEEKLY';
 
-    // Determine pay divisor for splitting monthly contributions
     let payDivisor = 2; // semi-monthly
     if (isMonthly) payDivisor = 1;
 
-    // Determine withholding tax period
     let wtPeriod: 'SEMI_MONTHLY' | 'MONTHLY' = 'SEMI_MONTHLY';
     if (isMonthly) wtPeriod = 'MONTHLY';
 
     const payrolls = [];
 
     for (const employee of employees) {
-      // Get attendance for the period
       const attendances = await prisma.attendance.findMany({
         where: {
           employeeId: employee.id,
@@ -117,7 +130,6 @@ export async function POST(request: NextRequest) {
         }
       }
 
-      // Get employee allowances
       const allowances = await prisma.employeeAllowance.findMany({
         where: {
           employeeId: employee.id,
@@ -144,7 +156,6 @@ export async function POST(request: NextRequest) {
         }
       }
 
-      // Get payroll adjustments
       const allAdjustments = await prisma.payrollAdjustment.findMany({
         where: { employeeId: employee.id, isActive: true },
       });
@@ -175,7 +186,6 @@ export async function POST(request: NextRequest) {
         }
       }
 
-      // Get active loans for deduction
       const loans = await prisma.employeeLoan.findMany({
         where: {
           employeeId: employee.id,
@@ -209,10 +219,8 @@ export async function POST(request: NextRequest) {
       const daysWorked = totalHours / 8;
       const basicPay = basicMonthlySalary / payDivisor;
 
-      // Calculate overtime
       const overtimePay = (overtimeMinutes / 60) * hourlyRate * 1.25;
 
-      // Calculate holiday pay
       let holidayPay = 0;
       if (holidayType === 'REGULAR') {
         holidayPay = (holidayHours / 8) * dailyRate;
@@ -220,45 +228,33 @@ export async function POST(request: NextRequest) {
         holidayPay = (holidayHours / 8) * dailyRate * 0.3;
       }
 
-      // Calculate night differential
       const nightDiffPay = ((nightDiffMinutes + nightDiffOTMinutes) / 60) * hourlyRate * 0.10;
 
-      // Gross Earnings = Basic Pay + All Allowances + OT/Holiday/Night Diff + Bonus
       const grossEarnings = basicPay + overtimePay + holidayPay + nightDiffPay +
         bonusPay + mobileAllowance + performancePay + otherAllowances;
 
-      // Monthly gross for contribution basis
       const monthlyGross = grossEarnings * payDivisor;
 
-      // Government contributions (monthly)
       const sss = calculateSSS(monthlyGross);
       const philHealth = calculatePhilHealth(monthlyGross);
       const pagIbig = calculatePagIbig(monthlyGross);
 
-      // Employee share per period - DEDUCTED from salary
       const sssContribution = Math.round(sss.employee / payDivisor * 100) / 100;
       const philHealthContribution = Math.round(philHealth.employee / payDivisor * 100) / 100;
       const pagIbigContribution = Math.round(pagIbig.employee / payDivisor * 100) / 100;
 
-      // Employer share per period - recorded in Finance, NOT added to salary
       const employerSSS = Math.round(sss.employer / payDivisor * 100) / 100;
       const employerPhilHealth = Math.round(philHealth.employer / payDivisor * 100) / 100;
       const employerPagIbig = Math.round(pagIbig.employer / payDivisor * 100) / 100;
       const employerEC = Math.round(sss.employerEC / payDivisor * 100) / 100;
 
-      // Taxable income = Gross - Employee mandatory contributions
       const taxableIncome = grossEarnings - sssContribution - philHealthContribution - pagIbigContribution;
-
-      // Withholding tax
       const withholdingTax = calculateWithholdingTax(taxableIncome, wtPeriod);
 
-      // Total deductions = Employee contributions + Withholding Tax + Loans + Others
       const totalDeductions = sssContribution + philHealthContribution + pagIbigContribution +
         withholdingTax +
         salaryLoanDeduction + computerLoanDeduction + otherLoanDeductions;
 
-      // Net Pay = Gross Earnings + Adjustments - Total Deductions
-      // NOTE: Employer share is NOT added to net pay
       const netPay = grossEarnings + adjustmentTotal - totalDeductions;
 
       const payroll = await prisma.payroll.upsert({
@@ -269,70 +265,25 @@ export async function POST(request: NextRequest) {
           },
         },
         update: {
-          basicSalary: basicMonthlySalary,
-          dailyRate,
-          hourlyRate,
-          daysWorked,
-          hoursWorked: totalHours,
-          basicPay,
-          overtimePay,
-          holidayPay,
-          nightDiffPay,
-          bonusPay,
-          mobileAllowance,
-          performancePay,
-          otherAllowances,
-          adjustmentTotal,
-          employerSSS,
-          employerPhilHealth,
-          employerPagIbig,
-          employerEC,
-          sssContribution,
-          philHealthContribution,
-          pagIbigContribution,
-          withholdingTax,
-          taxableIncome,
-          salaryLoanDeduction,
-          computerLoanDeduction,
-          otherLoanDeductions,
-          grossEarnings,
-          totalDeductions,
-          netPay,
-          status: 'PROCESSING',
+          basicSalary: basicMonthlySalary, dailyRate, hourlyRate, daysWorked,
+          hoursWorked: totalHours, basicPay, overtimePay, holidayPay, nightDiffPay,
+          bonusPay, mobileAllowance, performancePay, otherAllowances, adjustmentTotal,
+          employerSSS, employerPhilHealth, employerPagIbig, employerEC,
+          sssContribution, philHealthContribution, pagIbigContribution,
+          withholdingTax, taxableIncome,
+          salaryLoanDeduction, computerLoanDeduction, otherLoanDeductions,
+          grossEarnings, totalDeductions, netPay, status: 'PROCESSING',
         },
         create: {
-          payrollPeriodId: periodId,
-          employeeId: employee.id,
-          basicSalary: basicMonthlySalary,
-          dailyRate,
-          hourlyRate,
-          daysWorked,
-          hoursWorked: totalHours,
-          basicPay,
-          overtimePay,
-          holidayPay,
-          nightDiffPay,
-          bonusPay,
-          mobileAllowance,
-          performancePay,
-          otherAllowances,
-          adjustmentTotal,
-          employerSSS,
-          employerPhilHealth,
-          employerPagIbig,
-          employerEC,
-          sssContribution,
-          philHealthContribution,
-          pagIbigContribution,
-          withholdingTax,
-          taxableIncome,
-          salaryLoanDeduction,
-          computerLoanDeduction,
-          otherLoanDeductions,
-          grossEarnings,
-          totalDeductions,
-          netPay,
-          status: 'PROCESSING',
+          payrollPeriodId: periodId, employeeId: employee.id,
+          basicSalary: basicMonthlySalary, dailyRate, hourlyRate, daysWorked,
+          hoursWorked: totalHours, basicPay, overtimePay, holidayPay, nightDiffPay,
+          bonusPay, mobileAllowance, performancePay, otherAllowances, adjustmentTotal,
+          employerSSS, employerPhilHealth, employerPagIbig, employerEC,
+          sssContribution, philHealthContribution, pagIbigContribution,
+          withholdingTax, taxableIncome,
+          salaryLoanDeduction, computerLoanDeduction, otherLoanDeductions,
+          grossEarnings, totalDeductions, netPay, status: 'PROCESSING',
         },
       });
 
@@ -355,7 +306,7 @@ export async function POST(request: NextRequest) {
 export async function PUT(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || !['ADMIN', 'HR'].includes((session.user as any).role)) {
+    if (!session || !['ADMIN', 'HR', 'SUPER_ADMIN'].includes((session.user as any).role)) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
@@ -380,17 +331,11 @@ export async function PUT(request: NextRequest) {
       merged.salaryLoanDeduction + merged.computerLoanDeduction +
       merged.otherLoanDeductions + (merged.advancesDeduction || 0) + merged.otherDeductions;
 
-    // Net Pay = Gross + Adjustments - Deductions (employer share NOT included)
     const netPay = grossEarnings + (merged.adjustmentTotal || 0) - totalDeductions;
 
     const updated = await prisma.payroll.update({
       where: { id },
-      data: {
-        ...updateData,
-        grossEarnings,
-        totalDeductions,
-        netPay,
-      },
+      data: { ...updateData, grossEarnings, totalDeductions, netPay },
     });
 
     return NextResponse.json(updated);

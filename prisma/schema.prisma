@@ -22,10 +22,20 @@ model Company {
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
 
-  users       User[]
-  employees   Employee[]
-  departments Department[]
-  roles       Role[]
+  users            User[]
+  employees        Employee[]
+  departments      Department[]
+  roles            Role[]
+  payrollPeriods   PayrollPeriod[]
+  holidays         Holiday[]
+  workSchedules    WorkSchedule[]
+  officeLocations  OfficeLocation[]
+  companySettings  CompanySettings[]
+  systemSettings   SystemSettings[]
+  allowanceTypes   AllowanceType[]
+  loanTypes        LoanType[]
+  leaveTypeConfigs LeaveTypeConfig[]
+  auditLogs        AuditLog[]
 }
 
 enum SubscriptionStatus {
@@ -184,12 +194,14 @@ model Attendance {
   nightDiffOTMinutes Int              @default(0)
   overtimeMinutes    Int              @default(0)
   undertimeMinutes   Int              @default(0)
+  companyId          String?
   adjustedBy         User?            @relation("AdjustedBy", fields: [adjustedById], references: [id])
   employee           Employee         @relation(fields: [employeeId], references: [id], onDelete: Cascade)
 
   @@unique([employeeId, date])
   @@index([date])
   @@index([employeeId])
+  @@index([companyId])
 }
 
 model Leave {
@@ -256,11 +268,30 @@ model Notification {
 
 model SystemSettings {
   id          String   @id @default(cuid())
-  key         String   @unique
+  key         String
+  value       String
+  description String?
+  companyId   String?
+  company     Company? @relation(fields: [companyId], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([key, companyId])
+  @@index([companyId])
+}
+
+model CompanySettings {
+  id          String   @id @default(cuid())
+  companyId   String
+  key         String
   value       String
   description String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+  company     Company  @relation(fields: [companyId], references: [id])
+
+  @@unique([companyId, key])
+  @@index([companyId])
 }
 
 model AuditLog {
@@ -271,7 +302,11 @@ model AuditLog {
   entityId  String?
   details   String?
   ipAddress String?
+  companyId String?
   createdAt DateTime @default(now())
+  company   Company? @relation(fields: [companyId], references: [id])
+
+  @@index([companyId])
 }
 
 model Holiday {
@@ -282,15 +317,18 @@ model Holiday {
   description String?
   year        Int
   isRecurring Boolean     @default(false)
+  companyId   String?
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
+  company     Company?    @relation(fields: [companyId], references: [id])
 
-  @@unique([date, name])
+  @@unique([date, name, companyId])
+  @@index([companyId])
 }
 
 model WorkSchedule {
   id                  String               @id @default(cuid())
-  name                String               @unique
+  name                String
   description         String?
   mondayStart         String?
   mondayEnd           String?
@@ -315,8 +353,13 @@ model WorkSchedule {
   flexibleEnd         String?
   flexibleStart       String?
   requiredHours       Float                @default(9)
+  companyId           String?
   departmentSchedules DepartmentSchedule[]
   employeeSchedules   EmployeeSchedule[]
+  company             Company?             @relation(fields: [companyId], references: [id])
+
+  @@unique([name, companyId])
+  @@index([companyId])
 }
 
 model DepartmentSchedule {
@@ -365,9 +408,12 @@ model PayrollPeriod {
   createdAt     DateTime          @default(now())
   updatedAt     DateTime          @updatedAt
   isLocked      Boolean           @default(false)
+  companyId     String?
   payrolls      Payroll[]
+  company       Company?          @relation(fields: [companyId], references: [id])
 
-  @@unique([periodType, month, year])
+  @@unique([periodType, month, year, companyId])
+  @@index([companyId])
 }
 
 model Payroll {
@@ -420,13 +466,18 @@ model Payroll {
 
 model AllowanceType {
   id                 String              @id @default(cuid())
-  name               String              @unique
+  name               String
   description        String?
   isTaxable          Boolean             @default(true)
   isActive           Boolean             @default(true)
+  companyId          String?
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt
   employeeAllowances EmployeeAllowance[]
+  company            Company?            @relation(fields: [companyId], references: [id])
+
+  @@unique([name, companyId])
+  @@index([companyId])
 }
 
 model EmployeeAllowance {
@@ -448,15 +499,20 @@ model EmployeeAllowance {
 
 model LoanType {
   id            String         @id @default(cuid())
-  name          String         @unique
+  name          String
   description   String?
   maxAmount     Float?
   maxTermMonths Int?
   interestRate  Float          @default(0)
   isActive      Boolean        @default(true)
+  companyId     String?
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt
   employeeLoans EmployeeLoan[]
+  company       Company?       @relation(fields: [companyId], references: [id])
+
+  @@unique([name, companyId])
+  @@index([companyId])
 }
 
 model EmployeeLoan {
@@ -528,15 +584,20 @@ model PayrollAdjustment {
 
 model OfficeLocation {
   id                  String               @id @default(cuid())
-  name                String               @unique
+  name                String
   address             String?
   latitude            Float
   longitude           Float
   radiusMeters        Int                  @default(100)
   isActive            Boolean              @default(true)
+  companyId           String?
   createdAt           DateTime             @default(now())
   updatedAt           DateTime             @updatedAt
   departmentLocations DepartmentLocation[]
+  company             Company?             @relation(fields: [companyId], references: [id])
+
+  @@unique([name, companyId])
+  @@index([companyId])
 }
 
 model DepartmentLocation {
@@ -664,11 +725,16 @@ enum LoanPaymentStatus {
 
 model LeaveTypeConfig {
   id             String   @id @default(cuid())
-  code           String   @unique
+  code           String
   name           String
   defaultBalance Float    @default(0)
   description    String?
   isActive       Boolean  @default(true)
+  companyId      String?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
+  company        Company? @relation(fields: [companyId], references: [id])
+
+  @@unique([code, companyId])
+  @@index([companyId])
 }

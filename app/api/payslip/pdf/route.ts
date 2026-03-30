@@ -3,6 +3,7 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth-options';
 import { prisma } from '@/lib/db';
 import { generatePayslipHTML } from '@/lib/payslip-generator';
+import { getCompanyContext } from '@/lib/tenant';
 
 export const dynamic = 'force-dynamic';
 
@@ -10,6 +11,11 @@ export async function GET(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
     if (!session) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const ctx = await getCompanyContext();
+    if (!ctx) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
@@ -32,15 +38,6 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Payroll not found' }, { status: 404 });
     }
 
-    // Security: non-admin/HR can only download their own payslip
-    const role = (session.user as any).role;
-    if (!['ADMIN', 'HR'].includes(role)) {
-      const userEmployeeId = (session.user as any).employeeId;
-      if (payroll.employeeId !== userEmployeeId) {
-        return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-      }
-    }
-
     // Get employee details with department and role
     const employee = await prisma.employee.findUnique({
       where: { id: payroll.employeeId },
@@ -49,6 +46,20 @@ export async function GET(request: NextRequest) {
 
     if (!employee) {
       return NextResponse.json({ error: 'Employee not found' }, { status: 404 });
+    }
+
+    // Verify company access
+    if (ctx.companyId && employee.companyId !== ctx.companyId) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
+    // Security: non-admin/HR can only download their own payslip
+    const role = (session.user as any).role;
+    if (!['ADMIN', 'HR', 'SUPER_ADMIN'].includes(role)) {
+      const userEmployeeId = (session.user as any).employeeId;
+      if (payroll.employeeId !== userEmployeeId) {
+        return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+      }
     }
 
     // Build payroll object with employee for HTML generator
@@ -88,7 +99,7 @@ export async function GET(request: NextRequest) {
     }
 
     // Step 2: Poll for status until completion
-    const maxAttempts = 120; // 2 minutes max
+    const maxAttempts = 120;
     let attempts = 0;
 
     while (attempts < maxAttempts) {

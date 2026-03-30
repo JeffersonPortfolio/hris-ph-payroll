@@ -13,7 +13,7 @@ export async function GET(request: NextRequest) {
     }
 
     const role = (session.user as any).role;
-    if (!['ADMIN', 'HR', 'FINANCE'].includes(role)) {
+    if (!['ADMIN', 'HR', 'FINANCE', 'SUPER_ADMIN'].includes(role)) {
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
@@ -31,7 +31,6 @@ export async function GET(request: NextRequest) {
     } else if (table === 'incometax') {
       return NextResponse.json({ table: 'Income Tax Table 2026', data: getIncomeTaxTable() });
     } else {
-      // Return all tables
       return NextResponse.json({
         sss: { table: 'SSS Contribution Table 2025', data: getSSSTable() },
         philhealth: { table: 'PhilHealth Contribution Table 2024', data: getPhilHealthRates() },

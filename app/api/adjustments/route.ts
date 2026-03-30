@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth-options';
 import { prisma } from '@/lib/db';
+import { getCompanyContext } from '@/lib/tenant';
 
 export const dynamic = 'force-dynamic';
 
@@ -13,6 +14,11 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
+    const ctx = await getCompanyContext();
+    if (!ctx) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
     const { searchParams } = new URL(request.url);
     const employeeId = searchParams.get('employeeId');
     const cutoff = searchParams.get('cutoff');
@@ -21,6 +27,11 @@ export async function GET(request: NextRequest) {
     if (employeeId) where.employeeId = employeeId;
     if (cutoff) where.payrollCutoff = cutoff;
 
+    // Filter by company through employee relation
+    if (ctx.companyId) {
+      where.employee = { companyId: ctx.companyId };
+    }
+
     const adjustments = await prisma.payrollAdjustment.findMany({
       where,
       orderBy: { createdAt: 'desc' },
@@ -28,8 +39,11 @@ export async function GET(request: NextRequest) {
 
     // Fetch employee details
     const employeeIds = [...new Set(adjustments.map(a => a.employeeId))];
+    const employeeWhere: any = { id: { in: employeeIds } };
+    if (ctx.companyId) employeeWhere.companyId = ctx.companyId;
+
     const employees = await prisma.employee.findMany({
-      where: { id: { in: employeeIds } },
+      where: employeeWhere,
       select: {
         id: true,
         employeeId: true,
@@ -57,23 +71,30 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || !['ADMIN', 'HR'].includes((session.user as any).role)) {
+    if (!session || !['ADMIN', 'HR', 'SUPER_ADMIN'].includes((session.user as any).role)) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const ctx = await getCompanyContext();
+    if (!ctx) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
     const body = await request.json();
-    const {
-      employeeId,
-      adjustmentName,
-      adjustmentType,
-      amount,
-      payrollCutoff,
-      includeInGross,
-      notes,
-    } = body;
+    const { employeeId, adjustmentName, adjustmentType, amount, payrollCutoff, includeInGross, notes } = body;
 
     if (!employeeId || !adjustmentName || !amount) {
       return NextResponse.json({ error: 'Employee, adjustment name, and amount are required' }, { status: 400 });
+    }
+
+    // Verify employee belongs to same company
+    if (ctx.companyId) {
+      const employee = await prisma.employee.findFirst({
+        where: { id: employeeId, companyId: ctx.companyId },
+      });
+      if (!employee) {
+        return NextResponse.json({ error: 'Employee not found' }, { status: 404 });
+      }
     }
 
     const adjustment = await prisma.payrollAdjustment.create({
@@ -100,7 +121,12 @@ export async function POST(request: NextRequest) {
 export async function PUT(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || !['ADMIN', 'HR'].includes((session.user as any).role)) {
+    if (!session || !['ADMIN', 'HR', 'SUPER_ADMIN'].includes((session.user as any).role)) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const ctx = await getCompanyContext();
+    if (!ctx) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
@@ -109,6 +135,16 @@ export async function PUT(request: NextRequest) {
 
     if (!id) {
       return NextResponse.json({ error: 'Adjustment ID required' }, { status: 400 });
+    }
+
+    // Verify adjustment belongs to company
+    if (ctx.companyId) {
+      const existing = await prisma.payrollAdjustment.findFirst({
+        where: { id, employee: { companyId: ctx.companyId } },
+      });
+      if (!existing) {
+        return NextResponse.json({ error: 'Adjustment not found' }, { status: 404 });
+      }
     }
 
     if (updateData.amount) {
@@ -131,7 +167,12 @@ export async function PUT(request: NextRequest) {
 export async function DELETE(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || !['ADMIN', 'HR'].includes((session.user as any).role)) {
+    if (!session || !['ADMIN', 'HR', 'SUPER_ADMIN'].includes((session.user as any).role)) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const ctx = await getCompanyContext();
+    if (!ctx) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
@@ -140,6 +181,16 @@ export async function DELETE(request: NextRequest) {
 
     if (!id) {
       return NextResponse.json({ error: 'ID required' }, { status: 400 });
+    }
+
+    // Verify adjustment belongs to company
+    if (ctx.companyId) {
+      const existing = await prisma.payrollAdjustment.findFirst({
+        where: { id, employee: { companyId: ctx.companyId } },
+      });
+      if (!existing) {
+        return NextResponse.json({ error: 'Adjustment not found' }, { status: 404 });
+      }
     }
 
     await prisma.payrollAdjustment.delete({

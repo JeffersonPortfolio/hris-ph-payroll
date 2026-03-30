@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth-options';
 import { prisma } from '@/lib/db';
+import { getCompanyContext } from '@/lib/tenant';
 import * as XLSX from 'xlsx';
 
 export const dynamic = 'force-dynamic';
@@ -12,21 +13,31 @@ const MONTH_NAMES = ['', 'January', 'February', 'March', 'April', 'May', 'June',
 export async function GET(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session || !['ADMIN', 'HR'].includes((session.user as any).role)) {
+    if (!session || !['ADMIN', 'HR', 'SUPER_ADMIN'].includes((session.user as any).role)) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const ctx = await getCompanyContext();
+    if (!ctx) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
     const { searchParams } = new URL(request.url);
     const periodId = searchParams.get('periodId');
-    const format = searchParams.get('format') || 'excel'; // csv, excel, json
+    const format = searchParams.get('format') || 'excel';
 
     if (!periodId) {
       return NextResponse.json({ error: 'Period ID required' }, { status: 400 });
     }
 
-    // Get payroll period
-    const period = await prisma.payrollPeriod.findUnique({
-      where: { id: periodId },
+    // Get payroll period with company check
+    const periodWhere: any = { id: periodId };
+    if (ctx.companyId) {
+      periodWhere.companyId = ctx.companyId;
+    }
+
+    const period = await prisma.payrollPeriod.findFirst({
+      where: periodWhere,
     });
 
     if (!period) {
@@ -117,43 +128,18 @@ export async function GET(request: NextRequest) {
     if (format === 'excel' || format === 'xlsx') {
       const wb = XLSX.utils.book_new();
       
-      // Sheet 1: Payroll Details
       const ws = XLSX.utils.json_to_sheet(exportData);
-      
-      // Set column widths
       const colWidths = [
-        { wch: 15 }, // Employee ID
-        { wch: 25 }, // Employee Name
-        { wch: 15 }, // Department
-        { wch: 12 }, // Basic Salary
-        { wch: 12 }, // Days Worked
-        { wch: 12 }, // Hours Worked
-        { wch: 12 }, // Basic Pay
-        { wch: 12 }, // Overtime Pay
-        { wch: 12 }, // Holiday Pay
-        { wch: 12 }, // Night Diff Pay
-        { wch: 12 }, // Rest Day Pay
-        { wch: 15 }, // Mobile Allowance
-        { wch: 15 }, // Performance Pay
-        { wch: 15 }, // Other Allowances
-        { wch: 12 }, // Adjustments
-        { wch: 12 }, // Employer SSS
-        { wch: 15 }, // Employer PhilHealth
-        { wch: 15 }, // Employer Pag-IBIG
-        { wch: 15 }, // Total Gross Pay
-        { wch: 12 }, // Salary Loan
-        { wch: 15 }, // Computer Loan
-        { wch: 18 }, // Other Loan Deductions
-        { wch: 15 }, // Other Deductions
-        { wch: 15 }, // Total Deductions
-        { wch: 12 }, // Net Pay
-        { wch: 10 }, // Status
+        { wch: 15 }, { wch: 25 }, { wch: 15 }, { wch: 12 }, { wch: 12 },
+        { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 },
+        { wch: 12 }, { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 12 },
+        { wch: 12 }, { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 12 },
+        { wch: 15 }, { wch: 18 }, { wch: 15 }, { wch: 15 }, { wch: 12 },
+        { wch: 10 },
       ];
       ws['!cols'] = colWidths;
-      
       XLSX.utils.book_append_sheet(wb, ws, 'Payroll Details');
 
-      // Sheet 2: Summary
       const summaryData = [
         ['PAYROLL SUMMARY'],
         ['Period:', periodTitle],
@@ -179,17 +165,12 @@ export async function GET(request: NextRequest) {
       wsSummary['!cols'] = [{ wch: 30 }, { wch: 20 }];
       XLSX.utils.book_append_sheet(wb, wsSummary, 'Summary');
 
-      // Sheet 3: By Department (if multiple departments)
       const deptGroups: Record<string, any[]> = {};
       payrolls.forEach(p => {
         const emp = employeeMap.get(p.employeeId);
         const dept = emp?.department?.name || 'No Department';
         if (!deptGroups[dept]) deptGroups[dept] = [];
-        deptGroups[dept].push({
-          ...p,
-          employeeName: emp ? `${emp.lastName}, ${emp.firstName}` : '',
-          employeeId: emp?.employeeId || '',
-        });
+        deptGroups[dept].push(p);
       });
 
       const deptSummaryData: (string | number)[][] = [
@@ -200,10 +181,10 @@ export async function GET(request: NextRequest) {
       ];
 
       Object.entries(deptGroups).forEach(([dept, records]) => {
-        const deptGross = records.reduce((sum, r) => sum + r.grossEarnings, 0);
-        const deptDeductions = records.reduce((sum, r) => sum + r.totalDeductions, 0);
-        const deptNet = records.reduce((sum, r) => sum + r.netPay, 0);
-        const deptEmployerContrib = records.reduce((sum, r) => sum + r.employerSSS + r.employerPhilHealth + r.employerPagIbig, 0);
+        const deptGross = records.reduce((sum: number, r: any) => sum + r.grossEarnings, 0);
+        const deptDeductions = records.reduce((sum: number, r: any) => sum + r.totalDeductions, 0);
+        const deptNet = records.reduce((sum: number, r: any) => sum + r.netPay, 0);
+        const deptEmployerContrib = records.reduce((sum: number, r: any) => sum + r.employerSSS + r.employerPhilHealth + r.employerPagIbig, 0);
         deptSummaryData.push([dept, records.length, deptGross, deptDeductions, deptNet, deptEmployerContrib]);
       });
 
@@ -215,7 +196,6 @@ export async function GET(request: NextRequest) {
       wsDept['!cols'] = [{ wch: 20 }, { wch: 12 }, { wch: 15 }, { wch: 12 }, { wch: 12 }, { wch: 20 }];
       XLSX.utils.book_append_sheet(wb, wsDept, 'By Department');
 
-      // Generate buffer
       const excelBuffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
       const filename = `payroll_${period.periodType}_${MONTH_NAMES[period.month]}_${period.year}.xlsx`;
 
