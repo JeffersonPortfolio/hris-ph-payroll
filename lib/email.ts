@@ -10,10 +10,17 @@ export async function sendNotificationEmail({
   isHtml?: boolean;
 }) {
   try {
-    const apiKey = process.env.ABACUSAI_API_KEY;
+    const apiKey = process.env.ABACUSAI_API_KEY || process.env.ABACUS_API_KEY;
     if (!apiKey) {
-      console.error("Email send error: ABACUSAI_API_KEY is not configured");
-      return { success: false, message: "Email service not configured - missing API key" };
+      console.error(
+        "Email send error: ABACUSAI_API_KEY is not configured. " +
+          "Set ABACUSAI_API_KEY in your environment (e.g. Vercel project settings) to enable outgoing emails."
+      );
+      return {
+        success: false,
+        message:
+          "Email service not configured - missing ABACUSAI_API_KEY. The account was still created; share the temporary password manually.",
+      };
     }
 
     const appUrl = process.env.NEXTAUTH_URL || "";

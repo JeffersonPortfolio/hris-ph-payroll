@@ -165,144 +165,260 @@ export async function POST(request: Request) {
 
     if (!firstName || !lastName || !email || !dateHired) {
       return NextResponse.json(
-        { message: "Missing required fields" },
+        { message: "First name, last name, email and date hired are required." },
         { status: 400 }
       );
     }
 
-    // Check if email already exists
-    const existingEmail = await prisma.employee.findFirst({
-      where: { email },
+    // Normalize the email so duplicate detection is case-insensitive and
+    // whitespace-tolerant (a common source of "already exists" confusion).
+    const normalizedEmail = String(email).trim().toLowerCase();
+
+    // --- Duplicate detection (tenant-aware) ---------------------------------
+    // Employee emails only need to be unique WITHIN a company. Checking
+    // globally previously blocked creation when another company happened to
+    // use the same email, even though that employee was invisible in this
+    // company's (tenant-filtered) list.
+    const existingEmployee = await prisma.employee.findFirst({
+      where: {
+        email: normalizedEmail,
+        ...(ctx.companyId ? { companyId: ctx.companyId } : {}),
+      },
+      select: { id: true, isActive: true },
     });
 
-    if (existingEmail) {
+    if (existingEmployee) {
+      const message = existingEmployee.isActive
+        ? "An employee with this email already exists in your company."
+        : "An inactive/archived employee with this email already exists in your company. Please reactivate that record instead of creating a new one.";
+      return NextResponse.json({ message }, { status: 409 });
+    }
+
+    // If a user account is requested, inspect the User table. User.email is
+    // globally unique (required for login), so we must handle two cases:
+    //   1. The email belongs to a user that is already linked to an employee
+    //      -> genuine duplicate, reject.
+    //   2. The email belongs to an ORPHANED user (no linked employee) left
+    //      over from a previously failed creation -> safe to reuse/relink.
+    //      This was the root cause of "account already exists" errors where
+    //      nothing showed up in the employee list.
+    let orphanUser: { id: string } | null = null;
+    if (createUserAccount) {
+      const existingUser = await prisma.user.findUnique({
+        where: { email: normalizedEmail },
+        include: { employee: { select: { id: true } } },
+      });
+
+      if (existingUser) {
+        if (existingUser.employee) {
+          return NextResponse.json(
+            {
+              message:
+                "A user account with this email already exists and is linked to another employee.",
+            },
+            { status: 409 }
+          );
+        }
+        // Orphaned user - we'll re-link it inside the transaction.
+        orphanUser = { id: existingUser.id };
+        console.warn(
+          `[EMPLOYEE] Reusing orphaned user account for ${normalizedEmail} (id=${existingUser.id})`
+        );
+      }
+    }
+
+    // Prepare credentials (hashing is CPU work - do it outside the transaction
+    // to keep the DB transaction short).
+    let tempPassword = "";
+    let hashedPassword = "";
+    if (createUserAccount) {
+      tempPassword = Math.random().toString(36).slice(-8) + "A1!";
+      hashedPassword = await bcrypt.hash(tempPassword, 10);
+    }
+
+    const currentYear = new Date().getFullYear();
+    const validLeaveTypes = ["ANNUAL", "SICK", "EMERGENCY", "WFH", "COMPASSIONATE"];
+
+    // --- Atomic creation ----------------------------------------------------
+    // User + Employee + leave balances are created in a single transaction so
+    // that a failure at any step never leaves an orphaned user behind.
+    let result;
+    try {
+      result = await prisma.$transaction(async (tx) => {
+        let userId: string | null = null;
+
+        if (createUserAccount) {
+          if (orphanUser) {
+            const user = await tx.user.update({
+              where: { id: orphanUser.id },
+              data: {
+                password: hashedPassword,
+                name: `${firstName} ${lastName}`,
+                role: "EMPLOYEE",
+                isActive: true,
+                companyId: ctx.companyId || null,
+              },
+            });
+            userId = user.id;
+          } else {
+            const user = await tx.user.create({
+              data: {
+                email: normalizedEmail,
+                password: hashedPassword,
+                name: `${firstName} ${lastName}`,
+                role: "EMPLOYEE",
+                companyId: ctx.companyId || null,
+              },
+            });
+            userId = user.id;
+          }
+        }
+
+        // Generate a unique employee ID.
+        let employeeId = generateEmployeeId();
+        while (await tx.employee.findUnique({ where: { employeeId } })) {
+          employeeId = generateEmployeeId();
+        }
+
+        const employee = await tx.employee.create({
+          data: {
+            employeeId,
+            userId,
+            firstName,
+            lastName,
+            middleName,
+            email: normalizedEmail,
+            mobileNumber,
+            dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : null,
+            gender,
+            civilStatus,
+            nationality,
+            placeOfBirth,
+            currentAddress,
+            permanentAddress,
+            emergencyContactName,
+            emergencyContactRelation,
+            emergencyContactNumber,
+            departmentId: departmentId || null,
+            roleId: roleId || null,
+            employmentType: employmentType || "FULL_TIME",
+            employmentStatus: employmentStatus || "PROBATIONARY",
+            dateHired: new Date(dateHired),
+            regularizationDate: regularizationDate
+              ? new Date(regularizationDate)
+              : null,
+            sssNumber,
+            philHealthNumber,
+            pagIbigNumber,
+            tinNumber,
+            bankName,
+            bankAccountNumber,
+            companyId: ctx.companyId || null,
+          },
+          include: {
+            department: true,
+            role: true,
+          },
+        });
+
+        // Auto-assign leave balances from active leave type configs. Scope to
+        // the company's own configs plus global (companyId: null) defaults.
+        const activeConfigs = await tx.leaveTypeConfig.findMany({
+          where: {
+            isActive: true,
+            OR: [{ companyId: ctx.companyId || null }, { companyId: null }],
+          },
+        });
+
+        // De-duplicate by leave code (a company override should win over the
+        // global default) and keep only supported leave types.
+        const configByCode = new Map<string, (typeof activeConfigs)[number]>();
+        for (const c of activeConfigs) {
+          if (!validLeaveTypes.includes(c.code)) continue;
+          const existing = configByCode.get(c.code);
+          // Prefer the company-specific config over the global one.
+          if (!existing || (c.companyId && !existing.companyId)) {
+            configByCode.set(c.code, c);
+          }
+        }
+        const validConfigs = Array.from(configByCode.values());
+
+        if (validConfigs.length > 0) {
+          await tx.leaveBalance.createMany({
+            data: validConfigs.map((config) => ({
+              employeeId: employee.id,
+              leaveType: config.code as any,
+              balance: config.defaultBalance,
+              used: 0,
+              year: currentYear,
+            })),
+            skipDuplicates: true,
+          });
+        }
+
+        return { employee, userId };
+      });
+    } catch (txError: any) {
+      console.error("[EMPLOYEE] Transaction failed:", txError);
+      // Surface Prisma unique-constraint violations with a clear message.
+      if (txError?.code === "P2002") {
+        return NextResponse.json(
+          {
+            message:
+              "A record with this email or employee ID already exists. Please try again.",
+          },
+          { status: 409 }
+        );
+      }
       return NextResponse.json(
-        { message: "Email already exists" },
-        { status: 400 }
+        { message: "Failed to create employee. Please try again." },
+        { status: 500 }
       );
     }
 
-    let userId = null;
-    let tempPassword = "";
-
+    // --- Send welcome email (after the transaction has committed) -----------
+    // Email failures never roll back the created account; the temp password is
+    // always returned so the admin can share it manually.
     let emailSent = false;
     let emailError = "";
-
-    // Create user account if requested
-    if (createUserAccount) {
-      const existingUser = await prisma.user.findUnique({ where: { email } });
-      if (existingUser) {
-        return NextResponse.json(
-          { message: "User account already exists with this email" },
-          { status: 400 }
-        );
-      }
-
-      tempPassword = Math.random().toString(36).slice(-8) + "A1!";
-      const hashedPassword = await bcrypt.hash(tempPassword, 10);
-
-      const user = await prisma.user.create({
-        data: {
-          email,
-          password: hashedPassword,
-          name: `${firstName} ${lastName}`,
-          role: "EMPLOYEE",
-          companyId: ctx.companyId || null,
-        },
-      });
-      userId = user.id;
-
-      // Send welcome email
+    if (createUserAccount && result.userId) {
       try {
         const emailResult = await sendNotificationEmail({
-          to: email,
+          to: normalizedEmail,
           subject: "Welcome to HRIS - Your Account Details",
-          body: getWelcomeEmailTemplate(`${firstName} ${lastName}`, email, tempPassword),
+          body: getWelcomeEmailTemplate(
+            `${firstName} ${lastName}`,
+            normalizedEmail,
+            tempPassword
+          ),
         });
         emailSent = emailResult.success;
         if (!emailResult.success) {
           emailError = emailResult.message || "Unknown error";
-          console.error(`Failed to send welcome email to ${email}:`, emailError);
+          console.error(
+            `[EMPLOYEE] Failed to send welcome email to ${normalizedEmail}:`,
+            emailError
+          );
         }
-      } catch (err) {
-        console.error(`Exception sending welcome email to ${email}:`, err);
+      } catch (err: any) {
+        console.error(
+          `[EMPLOYEE] Exception sending welcome email to ${normalizedEmail}:`,
+          err?.message || err
+        );
         emailError = "Email service error";
       }
     }
 
-    // Generate unique employee ID
-    let employeeId = generateEmployeeId();
-    let idExists = await prisma.employee.findUnique({ where: { employeeId } });
-    while (idExists) {
-      employeeId = generateEmployeeId();
-      idExists = await prisma.employee.findUnique({ where: { employeeId } });
-    }
-
-    const employee = await prisma.employee.create({
-      data: {
-        employeeId,
-        userId,
-        firstName,
-        lastName,
-        middleName,
-        email,
-        mobileNumber,
-        dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : null,
-        gender,
-        civilStatus,
-        nationality,
-        placeOfBirth,
-        currentAddress,
-        permanentAddress,
-        emergencyContactName,
-        emergencyContactRelation,
-        emergencyContactNumber,
-        departmentId: departmentId || null,
-        roleId: roleId || null,
-        employmentType: employmentType || "FULL_TIME",
-        employmentStatus: employmentStatus || "PROBATIONARY",
-        dateHired: new Date(dateHired),
-        regularizationDate: regularizationDate ? new Date(regularizationDate) : null,
-        sssNumber,
-        philHealthNumber,
-        pagIbigNumber,
-        tinNumber,
-        bankName,
-        bankAccountNumber,
-        companyId: ctx.companyId || null,
+    return NextResponse.json(
+      {
+        employee: result.employee,
+        userAccountCreated: !!result.userId,
+        tempPassword,
+        emailSent,
+        emailError: emailError || undefined,
       },
-      include: {
-        department: true,
-        role: true,
-      },
-    });
-
-    // Auto-assign leave balances from active leave type configs
-    const currentYear = new Date().getFullYear();
-    const activeConfigs = await prisma.leaveTypeConfig.findMany({
-      where: { isActive: true },
-    });
-    const validLeaveTypes = ["ANNUAL", "SICK", "EMERGENCY", "WFH", "COMPASSIONATE"];
-    const validConfigs = activeConfigs.filter((c) => validLeaveTypes.includes(c.code));
-
-    if (validConfigs.length > 0) {
-      await prisma.leaveBalance.createMany({
-        data: validConfigs.map((config) => ({
-          employeeId: employee.id,
-          leaveType: config.code as any,
-          balance: config.defaultBalance,
-          used: 0,
-          year: currentYear,
-        })),
-      });
-    }
-
-    return NextResponse.json({ 
-      employee, 
-      tempPassword,
-      emailSent,
-      emailError: emailError || undefined,
-    }, { status: 201 });
+      { status: 201 }
+    );
   } catch (error) {
     console.error("Create employee error:", error);
     return NextResponse.json(
