@@ -292,10 +292,45 @@ export async function POST(request: Request) {
           }
         }
 
-        // Generate a unique employee ID.
-        let employeeId = generateEmployeeId();
+        // Generate a SEQUENTIAL employee ID scoped to the company.
+        // Format: EMP-0001, EMP-0002, ... following the order of creation.
+        // The first employee starts at 0001 and each new one increments by 1.
+        const generateSequentialId = async (): Promise<string> => {
+          // Find the most recent employee in this company that uses the
+          // sequential "EMP-<number>" pattern and take the highest number.
+          const existing = await tx.employee.findMany({
+            where: {
+              ...(ctx.companyId ? { companyId: ctx.companyId } : {}),
+              employeeId: { startsWith: "EMP-" },
+            },
+            select: { employeeId: true },
+          });
+
+          let maxNum = 0;
+          for (const e of existing) {
+            // Take the trailing digits after the last dash (handles EMP-0001
+            // and legacy EMP-YYYY-0001 formats by using the final segment).
+            const match = e.employeeId.match(/(\d+)$/);
+            if (match) {
+              const num = parseInt(match[1], 10);
+              if (!isNaN(num) && num > maxNum) maxNum = num;
+            }
+          }
+          return `EMP-${String(maxNum + 1).padStart(4, "0")}`;
+        };
+
+        let employeeId = await generateSequentialId();
+        // Safety loop in case of a rare collision (e.g. legacy non-sequential IDs).
+        let guard = 0;
         while (await tx.employee.findUnique({ where: { employeeId } })) {
-          employeeId = generateEmployeeId();
+          const match = employeeId.match(/(\d+)$/);
+          const next = match ? parseInt(match[1], 10) + 1 : 1;
+          employeeId = `EMP-${String(next).padStart(4, "0")}`;
+          if (++guard > 10000) {
+            // Fallback to the legacy random generator to avoid an infinite loop.
+            employeeId = generateEmployeeId();
+            break;
+          }
         }
 
         const employee = await tx.employee.create({

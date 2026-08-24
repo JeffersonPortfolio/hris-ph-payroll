@@ -39,64 +39,111 @@ function loadLeaflet(): Promise<any> {
 export default function GeofenceMap({ latitude, longitude, radiusKm }: GeofenceMapProps) {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<any>(null);
+  const markerRef = useRef<any>(null);
+  const circleRef = useRef<any>(null);
   const [ready, setReady] = useState(false);
+
+  // Coerce to numbers and validate — invalid coords must never reach Leaflet,
+  // otherwise it throws and crashes the whole page.
+  const lat = Number(latitude);
+  const lng = Number(longitude);
+  const radius = Number(radiusKm);
+  const validCoords =
+    Number.isFinite(lat) &&
+    Number.isFinite(lng) &&
+    lat >= -90 &&
+    lat <= 90 &&
+    lng >= -180 &&
+    lng <= 180;
+  const radiusMeters = (Number.isFinite(radius) && radius > 0 ? radius : 0.1) * 1000;
 
   useEffect(() => {
     loadLeaflet().then(() => setReady(true)).catch(console.error);
   }, []);
 
+  // Initialize the map exactly ONCE (never destroy/recreate on coord changes).
   useEffect(() => {
-    if (!ready || !mapRef.current) return;
+    if (!ready || !mapRef.current || mapInstanceRef.current) return;
     const L = (window as any).L;
     if (!L) return;
 
-    if (mapInstanceRef.current) {
-      mapInstanceRef.current.remove();
-      mapInstanceRef.current = null;
+    try {
+      // Guard against a container that still holds a stale Leaflet id
+      // (can happen with React strict-mode double effects / fast refresh).
+      if ((mapRef.current as any)._leaflet_id) {
+        (mapRef.current as any)._leaflet_id = null;
+      }
+
+      const map = L.map(mapRef.current, {
+        center: validCoords ? [lat, lng] : [12.8797, 121.774], // default: PH center
+        zoom: 15,
+        scrollWheelZoom: true,
+      });
+      mapInstanceRef.current = map;
+
+      L.tileLayer(TILE_URL, {
+        attribution: "&copy; OpenStreetMap contributors",
+        maxZoom: 19,
+      }).addTo(map);
+    } catch (err) {
+      console.error("[GeofenceMap] init error:", err);
     }
-
-    const radiusMeters = radiusKm * 1000;
-
-    const map = L.map(mapRef.current, {
-      center: [latitude, longitude],
-      zoom: 15,
-      scrollWheelZoom: true,
-    });
-    mapInstanceRef.current = map;
-
-    L.tileLayer(TILE_URL, {
-      attribution: "&copy; OpenStreetMap contributors",
-      maxZoom: 19,
-    }).addTo(map);
-
-    const markerIcon = L.divIcon({
-      className: "",
-      html: '<div style="display:flex;align-items:center;justify-content:center;width:28px;height:28px;"><svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="#dc2626" stroke="#991b1b" stroke-width="1.5"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3" fill="white" stroke="#991b1b"/></svg></div>',
-      iconSize: [28, 28],
-      iconAnchor: [14, 28],
-    });
-
-    L.marker([latitude, longitude], { icon: markerIcon }).addTo(map);
-
-    const circle = L.circle([latitude, longitude], {
-      radius: radiusMeters,
-      color: "#dc2626",
-      weight: 2,
-      opacity: 0.7,
-      fillColor: "#fca5a5",
-      fillOpacity: 0.25,
-      dashArray: "6, 4",
-    }).addTo(map);
-
-    map.fitBounds(circle.getBounds(), { padding: [30, 30] });
 
     return () => {
       if (mapInstanceRef.current) {
-        mapInstanceRef.current.remove();
+        try {
+          mapInstanceRef.current.remove();
+        } catch {
+          /* noop */
+        }
         mapInstanceRef.current = null;
+        markerRef.current = null;
+        circleRef.current = null;
       }
     };
-  }, [ready, latitude, longitude, radiusKm]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready]);
+
+  // Update marker, circle and view whenever coords/radius change.
+  useEffect(() => {
+    const L = (window as any).L;
+    const map = mapInstanceRef.current;
+    if (!ready || !L || !map || !validCoords) return;
+
+    try {
+      const markerIcon = L.divIcon({
+        className: "",
+        html: '<div style="display:flex;align-items:center;justify-content:center;width:28px;height:28px;"><svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="#dc2626" stroke="#991b1b" stroke-width="1.5"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3" fill="white" stroke="#991b1b"/></svg></div>',
+        iconSize: [28, 28],
+        iconAnchor: [14, 28],
+      });
+
+      if (markerRef.current) {
+        markerRef.current.setLatLng([lat, lng]);
+      } else {
+        markerRef.current = L.marker([lat, lng], { icon: markerIcon }).addTo(map);
+      }
+
+      if (circleRef.current) {
+        circleRef.current.setLatLng([lat, lng]);
+        circleRef.current.setRadius(radiusMeters);
+      } else {
+        circleRef.current = L.circle([lat, lng], {
+          radius: radiusMeters,
+          color: "#dc2626",
+          weight: 2,
+          opacity: 0.7,
+          fillColor: "#fca5a5",
+          fillOpacity: 0.25,
+          dashArray: "6, 4",
+        }).addTo(map);
+      }
+
+      map.fitBounds(circleRef.current.getBounds(), { padding: [30, 30] });
+    } catch (err) {
+      console.error("[GeofenceMap] update error:", err);
+    }
+  }, [ready, lat, lng, radiusMeters, validCoords]);
 
   return (
     <div ref={mapRef} className="w-full h-full z-0">

@@ -242,7 +242,7 @@ export default function OfficeLocationsPage() {
                   <TableCell className="font-medium">{location.name}</TableCell>
                   <TableCell>{location.address || '-'}</TableCell>
                   <TableCell className="font-mono text-sm">
-                    {location.latitude.toFixed(6)}, {location.longitude.toFixed(6)}
+                    {Number(location.latitude).toFixed(6)}, {Number(location.longitude).toFixed(6)}
                   </TableCell>
                   <TableCell>
                     <span className="font-medium">{(location.radiusMeters / 1000).toFixed(2)} km</span>
