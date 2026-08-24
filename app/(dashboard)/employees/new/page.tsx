@@ -15,9 +15,17 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ArrowLeft, UserPlus } from "lucide-react";
+import { ArrowLeft, UserPlus, Copy, CheckCircle2 } from "lucide-react";
 import Link from "next/link";
 import toast from "react-hot-toast";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
 
 export default function NewEmployeePage() {
   const router = useRouter();
@@ -25,6 +33,11 @@ export default function NewEmployeePage() {
   const [departments, setDepartments] = useState<any[]>([]);
   const [roles, setRoles] = useState<any[]>([]);
   const [createAccount, setCreateAccount] = useState(true);
+  // Temporary password dialog state
+  const [showTempPwDialog, setShowTempPwDialog] = useState(false);
+  const [tempPassword, setTempPassword] = useState("");
+  const [employeeEmail, setEmployeeEmail] = useState("");
+  const [copied, setCopied] = useState(false);
 
   const [formData, setFormData] = useState({
     firstName: "",
@@ -97,20 +110,23 @@ export default function NewEmployeePage() {
         
         if (data.tempPassword) {
           if (data.emailSent === false) {
-            // Show password in alert so user can copy it
-            alert(`Employee created!\n\nEmail could not be sent.\n\nTemporary Password: ${data.tempPassword}\n\nPlease copy this password and share it with the employee.`);
-            toast.success("Employee created! Check the alert for temporary password.", { duration: 5000 });
+            // Show password in dialog with copy button
+            setTempPassword(data.tempPassword);
+            setEmployeeEmail(data.employee?.email || formData.email);
+            setShowTempPwDialog(true);
+            toast.success("Employee created! Email could not be sent - see temporary password below.", { duration: 5000 });
           } else {
             toast.success("Employee created! Welcome email sent successfully.", { duration: 3000 });
+            setTimeout(() => {
+              router.push("/employees");
+            }, 1500);
           }
         } else {
           toast.success("Employee created successfully!", { duration: 3000 });
+          setTimeout(() => {
+            router.push("/employees");
+          }, 1500);
         }
-        
-        // Delay redirect to ensure toast is visible
-        setTimeout(() => {
-          router.push("/employees");
-        }, 1500);
       } else {
         toast.error(data?.message ?? "Failed to create employee");
       }
@@ -123,6 +139,22 @@ export default function NewEmployeePage() {
 
   const handleChange = (field: string, value: string) => {
     setFormData((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const copyPassword = async () => {
+    try {
+      await navigator.clipboard.writeText(tempPassword);
+      setCopied(true);
+      toast.success("Password copied to clipboard!");
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      toast.error("Failed to copy - please copy manually");
+    }
+  };
+
+  const closeTempPwDialog = () => {
+    setShowTempPwDialog(false);
+    router.push("/employees");
   };
 
   return (
@@ -450,6 +482,57 @@ export default function NewEmployeePage() {
           </Button>
         </div>
       </form>
+
+      {/* Temporary Password Dialog */}
+      <Dialog open={showTempPwDialog} onOpenChange={setShowTempPwDialog}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <CheckCircle2 className="h-5 w-5 text-green-600" />
+              Employee Created Successfully!
+            </DialogTitle>
+            <DialogDescription>
+              Email could not be sent. Please share this temporary password with the employee.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <Label className="text-sm text-gray-500">Employee Email</Label>
+              <p className="font-medium">{employeeEmail}</p>
+            </div>
+            <div>
+              <Label className="text-sm text-gray-500">Temporary Password</Label>
+              <div className="flex gap-2 mt-1">
+                <Input
+                  readOnly
+                  value={tempPassword}
+                  className="font-mono text-lg"
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  onClick={copyPassword}
+                >
+                  {copied ? (
+                    <CheckCircle2 className="h-4 w-4 text-green-600" />
+                  ) : (
+                    <Copy className="h-4 w-4" />
+                  )}
+                </Button>
+              </div>
+              <p className="text-xs text-amber-600 mt-2">
+                ⚠️ Save this password now - it won't be shown again after you close this dialog.
+              </p>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button onClick={closeTempPwDialog} className="w-full">
+              Done - Go to Employees List
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
