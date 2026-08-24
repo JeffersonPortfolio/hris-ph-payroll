@@ -179,50 +179,68 @@ export async function POST(request: Request) {
     // globally previously blocked creation when another company happened to
     // use the same email, even though that employee was invisible in this
     // company's (tenant-filtered) list.
+    // Case-insensitive match catches legacy rows that were stored with mixed
+    // casing before email normalization was introduced.
     const existingEmployee = await prisma.employee.findFirst({
       where: {
-        email: normalizedEmail,
+        email: { equals: normalizedEmail, mode: "insensitive" },
         ...(ctx.companyId ? { companyId: ctx.companyId } : {}),
       },
-      select: { id: true, isActive: true },
+      select: { id: true, isActive: true, firstName: true, lastName: true },
     });
 
     if (existingEmployee) {
       const message = existingEmployee.isActive
-        ? "An employee with this email already exists in your company."
-        : "An inactive/archived employee with this email already exists in your company. Please reactivate that record instead of creating a new one.";
+        ? `An active employee (${existingEmployee.firstName} ${existingEmployee.lastName}) with this email already exists in your company.`
+        : `An inactive/archived employee (${existingEmployee.firstName} ${existingEmployee.lastName}) with this email already exists in your company. Please reactivate that record instead of creating a new one.`;
       return NextResponse.json({ message }, { status: 409 });
     }
 
     // If a user account is requested, inspect the User table. User.email is
-    // globally unique (required for login), so we must handle two cases:
-    //   1. The email belongs to a user that is already linked to an employee
-    //      -> genuine duplicate, reject.
-    //   2. The email belongs to an ORPHANED user (no linked employee) left
-    //      over from a previously failed creation -> safe to reuse/relink.
-    //      This was the root cause of "account already exists" errors where
-    //      nothing showed up in the employee list.
+    // GLOBALLY unique because NextAuth authenticates by email alone (there is
+    // no company scoping at login), so the same email can never own two login
+    // accounts. We therefore handle three cases explicitly so the admin gets
+    // an ACTIONABLE message instead of a generic "already exists":
+    //   1. Orphaned user (no linked employee) -> reclaim/relink it. This was
+    //      the root cause of "account already exists" errors where nothing
+    //      showed up in the employee list (a previous creation half-failed).
+    //   2. User linked to an employee in ANOTHER company -> the record is
+    //      invisible in this company's tenant-filtered list; say so clearly.
+    //   3. User linked to an employee in THIS company -> genuine duplicate.
     let orphanUser: { id: string } | null = null;
     if (createUserAccount) {
-      const existingUser = await prisma.user.findUnique({
-        where: { email: normalizedEmail },
-        include: { employee: { select: { id: true } } },
+      const existingUser = await prisma.user.findFirst({
+        where: { email: { equals: normalizedEmail, mode: "insensitive" } },
+        include: {
+          employee: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              companyId: true,
+              isActive: true,
+            },
+          },
+        },
       });
 
       if (existingUser) {
-        if (existingUser.employee) {
-          return NextResponse.json(
-            {
-              message:
-                "A user account with this email already exists and is linked to another employee.",
-            },
-            { status: 409 }
+        const linked = existingUser.employee;
+        if (linked) {
+          const sameCompany =
+            !ctx.companyId || linked.companyId === ctx.companyId;
+          const message = sameCompany
+            ? `A login account for this email already belongs to employee ${linked.firstName} ${linked.lastName} in your company.`
+            : "This email is already registered as a login account under a different company. Login emails must be unique across the whole system — please use a different email address for this employee.";
+          console.warn(
+            `[EMPLOYEE] Blocked create for ${normalizedEmail}: user already linked to employee ${linked.id} (sameCompany=${sameCompany})`
           );
+          return NextResponse.json({ message }, { status: 409 });
         }
         // Orphaned user - we'll re-link it inside the transaction.
         orphanUser = { id: existingUser.id };
         console.warn(
-          `[EMPLOYEE] Reusing orphaned user account for ${normalizedEmail} (id=${existingUser.id})`
+          `[EMPLOYEE] Reclaiming orphaned user account for ${normalizedEmail} (id=${existingUser.id})`
         );
       }
     }

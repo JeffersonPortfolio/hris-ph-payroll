@@ -28,7 +28,7 @@ import {
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog";
-import { Shield, Plus, Edit, Key, UserX, UserCheck } from "lucide-react";
+import { Shield, Plus, Edit, Key, UserX, UserCheck, KeyRound, Copy, RefreshCw } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { formatDate } from "@/lib/utils";
 import toast from "react-hot-toast";
@@ -42,6 +42,12 @@ export default function UsersPage() {
     role: "",
     isActive: true,
   });
+  // --- Temporary password dialog state ---
+  const [tempPwDialog, setTempPwDialog] = useState(false);
+  const [tempPwUser, setTempPwUser] = useState<any>(null);
+  const [tempPwInput, setTempPwInput] = useState("");
+  const [tempPwResult, setTempPwResult] = useState("");
+  const [tempPwSaving, setTempPwSaving] = useState(false);
 
   const fetchUsers = async () => {
     setLoading(true);
@@ -97,6 +103,56 @@ export default function UsersPage() {
       }
     } catch (error) {
       toast.error("An error occurred");
+    }
+  };
+
+  const openTempPwDialog = (user: any) => {
+    setTempPwUser(user);
+    setTempPwInput("");
+    setTempPwResult("");
+    setTempPwDialog(true);
+  };
+
+  const generateRandomPassword = () => {
+    const pw = Math.random().toString(36).slice(-8) + "A1!";
+    setTempPwInput(pw);
+  };
+
+  const handleSetTempPassword = async () => {
+    if (!tempPwUser?.id) return;
+    if (tempPwInput && tempPwInput.trim().length < 6) {
+      toast.error("Password must be at least 6 characters.");
+      return;
+    }
+    setTempPwSaving(true);
+    try {
+      const res = await fetch(`/api/users/${tempPwUser.id}/reset-password`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        // Empty password tells the API to auto-generate one.
+        body: JSON.stringify({ password: tempPwInput.trim() }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setTempPwResult(data?.tempPassword ?? tempPwInput.trim());
+        toast.success("Temporary password set!");
+      } else {
+        toast.error(data?.message ?? "Failed to set temporary password");
+      }
+    } catch (error) {
+      toast.error("An error occurred");
+    } finally {
+      setTempPwSaving(false);
+    }
+  };
+
+  const copyTempPassword = async () => {
+    if (!tempPwResult) return;
+    try {
+      await navigator.clipboard.writeText(tempPwResult);
+      toast.success("Copied to clipboard");
+    } catch {
+      toast.error("Copy failed - please copy manually");
     }
   };
 
@@ -188,9 +244,18 @@ export default function UsersPage() {
                         <Button
                           variant="ghost"
                           size="icon"
+                          title="Send password reset email"
                           onClick={() => handleResetPassword(user?.id)}
                         >
                           <Key className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          title="Set temporary password"
+                          onClick={() => openTempPwDialog(user)}
+                        >
+                          <KeyRound className="h-4 w-4" />
                         </Button>
                       </div>
                     </TableCell>
@@ -253,6 +318,92 @@ export default function UsersPage() {
               Cancel
             </Button>
             <Button onClick={handleUpdate}>Save Changes</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Set Temporary Password Dialog */}
+      <Dialog open={tempPwDialog} onOpenChange={setTempPwDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <KeyRound className="h-5 w-5" />
+              Set Temporary Password
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <p className="text-sm text-gray-500">User</p>
+              <p className="font-medium">{tempPwUser?.name ?? ""}</p>
+              <p className="text-sm text-gray-500">{tempPwUser?.email ?? ""}</p>
+            </div>
+
+            {!tempPwResult ? (
+              <>
+                <div className="space-y-2">
+                  <Label>Temporary Password</Label>
+                  <div className="flex gap-2">
+                    <Input
+                      value={tempPwInput}
+                      onChange={(e) => setTempPwInput(e.target.value)}
+                      placeholder="Leave blank to auto-generate"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon"
+                      title="Generate random password"
+                      onClick={generateRandomPassword}
+                    >
+                      <RefreshCw className="h-4 w-4" />
+                    </Button>
+                  </div>
+                  <p className="text-xs text-gray-500">
+                    Type a password (min 6 characters) or leave blank to
+                    auto-generate one. Share it with the employee so they can log
+                    in and change it.
+                  </p>
+                </div>
+              </>
+            ) : (
+              <div className="space-y-2">
+                <Label>New Temporary Password</Label>
+                <div className="flex gap-2">
+                  <Input readOnly value={tempPwResult} className="font-mono" />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    title="Copy password"
+                    onClick={copyTempPassword}
+                  >
+                    <Copy className="h-4 w-4" />
+                  </Button>
+                </div>
+                <p className="text-xs text-amber-600">
+                  ⚠️ Copy this now — it will not be shown again. Give it to the
+                  employee to log in with.
+                </p>
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            {!tempPwResult ? (
+              <>
+                <Button
+                  variant="outline"
+                  onClick={() => setTempPwDialog(false)}
+                  disabled={tempPwSaving}
+                >
+                  Cancel
+                </Button>
+                <Button onClick={handleSetTempPassword} disabled={tempPwSaving}>
+                  {tempPwSaving ? "Saving..." : "Set Password"}
+                </Button>
+              </>
+            ) : (
+              <Button onClick={() => setTempPwDialog(false)}>Done</Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>
