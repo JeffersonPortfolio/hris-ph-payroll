@@ -1,3 +1,12 @@
+/**
+ * Sends an email using whichever provider is configured (checked in order):
+ *   1. Resend           -> set RESEND_API_KEY  (recommended for production/Vercel)
+ *   2. SMTP (nodemailer) -> set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS  (e.g. Gmail)
+ *   3. Abacus.AI         -> set ABACUSAI_API_KEY  (only for local dev; token is short-lived)
+ *
+ * The sender address is taken from EMAIL_FROM (falls back to a noreply@<domain> derived
+ * from NEXTAUTH_URL). Returns { success, message } and never throws.
+ */
 export async function sendNotificationEmail({
   to,
   subject,
@@ -9,69 +18,118 @@ export async function sendNotificationEmail({
   body: string;
   isHtml?: boolean;
 }) {
-  try {
-    const apiKey = process.env.ABACUSAI_API_KEY || process.env.ABACUS_API_KEY;
-    if (!apiKey) {
-      console.error(
-        "Email send error: ABACUSAI_API_KEY is not configured. " +
-          "Set ABACUSAI_API_KEY in your environment (e.g. Vercel project settings) to enable outgoing emails."
-      );
-      return {
-        success: false,
-        message:
-          "Email service not configured - missing ABACUSAI_API_KEY. The account was still created; share the temporary password manually.",
-      };
+  // Resolve sender name + address
+  const appUrl = process.env.NEXTAUTH_URL || "";
+  let appName = "HRIS";
+  let derivedSender = "noreply@hris.local";
+  if (appUrl) {
+    try {
+      const url = new URL(appUrl);
+      appName = url.hostname.split(".")[0] || "HRIS";
+      derivedSender = `noreply@${url.hostname}`;
+    } catch {
+      console.warn("[EMAIL] Invalid NEXTAUTH_URL, using default sender");
     }
-
-    const appUrl = process.env.NEXTAUTH_URL || "";
-    let appName = "HRIS";
-    let senderEmail = "noreply@hris.abacusai.app";
-    
-    if (appUrl) {
-      try {
-        const url = new URL(appUrl);
-        appName = url.hostname.split(".")[0] || "HRIS";
-        senderEmail = `noreply@${url.hostname}`;
-      } catch (e) {
-        console.warn("Invalid NEXTAUTH_URL, using defaults");
-      }
-    }
-
-    const payload = {
-      deployment_token: apiKey,
-      subject,
-      body,
-      is_html: isHtml,
-      recipient_email: to,
-      sender_email: senderEmail,
-      sender_alias: `${appName} HRIS`,
-    };
-
-    console.log(`[EMAIL] Sending to: ${to}`);
-    console.log(`[EMAIL] Subject: ${subject}`);
-    console.log(`[EMAIL] Sender: ${senderEmail}`);
-
-    const response = await fetch("https://apps.abacus.ai/api/sendNotificationEmail", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-
-    const result = await response.json();
-    console.log(`[EMAIL] Response status: ${response.status}`);
-    console.log(`[EMAIL] Response body:`, JSON.stringify(result));
-    
-    if (!result.success) {
-      console.error(`[EMAIL] Failed for ${to}:`, result.message || result.error || JSON.stringify(result));
-      return { success: false, message: result.message || result.error || "Email service error" };
-    }
-    
-    console.log(`[EMAIL] Successfully sent to ${to}`);
-    return { success: true, message: "Email sent" };
-  } catch (error: any) {
-    console.error("[EMAIL] Exception:", error?.message || error);
-    return { success: false, message: error?.message || "Failed to send email" };
   }
+  const fromAddress = process.env.EMAIL_FROM || derivedSender;
+  const fromName = process.env.EMAIL_FROM_NAME || `${appName} HRIS`;
+
+  console.log(`[EMAIL] Sending to: ${to} | Subject: ${subject}`);
+
+  // ---- 1. Resend ----------------------------------------------------------
+  const resendKey = process.env.RESEND_API_KEY;
+  if (resendKey) {
+    try {
+      const { Resend } = await import("resend");
+      const resend = new Resend(resendKey);
+      const { data, error } = await resend.emails.send({
+        from: `${fromName} <${fromAddress}>`,
+        to,
+        subject,
+        ...(isHtml ? { html: body } : { text: body }),
+      });
+      if (error) {
+        console.error(`[EMAIL][Resend] Failed for ${to}:`, error);
+        return { success: false, message: error.message || "Resend error" };
+      }
+      console.log(`[EMAIL][Resend] Sent to ${to} (id: ${data?.id})`);
+      return { success: true, message: "Email sent via Resend" };
+    } catch (error: any) {
+      console.error("[EMAIL][Resend] Exception:", error?.message || error);
+      return { success: false, message: error?.message || "Resend exception" };
+    }
+  }
+
+  // ---- 2. SMTP (nodemailer) ----------------------------------------------
+  const smtpHost = process.env.SMTP_HOST;
+  if (smtpHost) {
+    try {
+      const nodemailer = await import("nodemailer");
+      const port = Number(process.env.SMTP_PORT || 587);
+      const transporter = nodemailer.createTransport({
+        host: smtpHost,
+        port,
+        secure: port === 465, // true for 465, false for 587/others
+        auth: {
+          user: process.env.SMTP_USER,
+          pass: process.env.SMTP_PASS,
+        },
+      });
+      const info = await transporter.sendMail({
+        from: `"${fromName}" <${process.env.SMTP_FROM || process.env.SMTP_USER || fromAddress}>`,
+        to,
+        subject,
+        ...(isHtml ? { html: body } : { text: body }),
+      });
+      console.log(`[EMAIL][SMTP] Sent to ${to} (id: ${info.messageId})`);
+      return { success: true, message: "Email sent via SMTP" };
+    } catch (error: any) {
+      console.error("[EMAIL][SMTP] Exception:", error?.message || error);
+      return { success: false, message: error?.message || "SMTP exception" };
+    }
+  }
+
+  // ---- 3. Abacus.AI (local dev fallback; token is short-lived) ------------
+  const apiKey = process.env.ABACUSAI_API_KEY || process.env.ABACUS_API_KEY;
+  if (apiKey) {
+    try {
+      const payload = {
+        deployment_token: apiKey,
+        subject,
+        body,
+        is_html: isHtml,
+        recipient_email: to,
+        sender_email: fromAddress,
+        sender_alias: fromName,
+      };
+      const response = await fetch("https://apps.abacus.ai/api/sendNotificationEmail", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const result = await response.json();
+      if (!result.success) {
+        console.error(`[EMAIL][Abacus] Failed for ${to}:`, result.message || result.error);
+        return { success: false, message: result.message || result.error || "Abacus email error" };
+      }
+      console.log(`[EMAIL][Abacus] Sent to ${to}`);
+      return { success: true, message: "Email sent via Abacus.AI" };
+    } catch (error: any) {
+      console.error("[EMAIL][Abacus] Exception:", error?.message || error);
+      return { success: false, message: error?.message || "Abacus exception" };
+    }
+  }
+
+  // ---- No provider configured --------------------------------------------
+  console.error(
+    "[EMAIL] No email provider configured. Set RESEND_API_KEY (recommended), " +
+      "or SMTP_HOST/SMTP_USER/SMTP_PASS, in your environment (e.g. Vercel project settings)."
+  );
+  return {
+    success: false,
+    message:
+      "Email service not configured. The account was still created; share the temporary password manually.",
+  };
 }
 
 export function getLeaveApprovalEmailTemplate(
