@@ -227,7 +227,7 @@ export default function PayrollPage() {
   };
 
   const handleProcessPayroll = async (periodId: string) => {
-    if (!confirm('Generate/Regenerate payroll for all employees in this period? This will recalculate all earnings and deductions.')) return;
+    if (!confirm('Generate/Refresh payroll for all employees in this period?\n\nThis pulls the LATEST attendance, allowances, and adjustments and recomputes all earnings and deductions. Use this to apply corrections even if attendance was already locked.')) return;
     
     setProcessing(true);
     try {
@@ -512,11 +512,11 @@ export default function PayrollPage() {
                               <Button
                                 variant="ghost"
                                 size="sm"
-                                title="Regenerate Payroll"
+                                title="Refresh / Regenerate Payroll (apply corrections to attendance, allowances & adjustments)"
                                 onClick={() => handleProcessPayroll(period.id)}
                                 disabled={processing}
                               >
-                                <RefreshCw className="h-4 w-4 text-amber-600" />
+                                <RefreshCw className={`h-4 w-4 text-amber-600 ${processing ? 'animate-spin' : ''}`} />
                               </Button>
                               <Button
                                 variant="ghost"

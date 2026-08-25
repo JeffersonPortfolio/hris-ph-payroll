@@ -116,6 +116,7 @@ export default function AttendancePage() {
   const [payrollPeriods, setPayrollPeriods] = useState<PayrollPeriod[]>([]);
   const [selectedPeriod, setSelectedPeriod] = useState<PayrollPeriod | null>(null);
   const [viewMode, setViewMode] = useState<'cutoff' | 'monthly'>('cutoff');
+  const [correctionMode, setCorrectionMode] = useState(false);
   const [currentDate, setCurrentDate] = useState(new Date());
   const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
   const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth() + 1);
@@ -154,6 +155,11 @@ export default function AttendancePage() {
 
   const isAdmin = (session?.user as any)?.role === "ADMIN" || (session?.user as any)?.role === "HR";
   const isEmployee = (session?.user as any)?.role === "EMPLOYEE";
+
+  // Reset correction mode whenever the selected period changes to prevent accidental edits
+  useEffect(() => {
+    setCorrectionMode(false);
+  }, [selectedPeriod?.id]);
 
   // Memoize date range to prevent unnecessary recalculations
   const dateRange = useMemo(() => {
@@ -456,8 +462,8 @@ export default function AttendancePage() {
 
   const handleCellClick = (employee: Employee, date: Date) => {
     if (!isAdmin) return;
-    if (selectedPeriod?.isLocked) {
-      toast.error("Cannot edit. This cutoff period is locked.");
+    if (selectedPeriod?.isLocked && viewMode === 'cutoff' && !correctionMode) {
+      toast.error("This period is locked. Turn on Correction Mode to edit for a payroll correction.");
       return;
     }
     const attendance = getAttendanceForDay(employee.id, date);
@@ -955,11 +961,28 @@ export default function AttendancePage() {
         )}
       </div>
 
-      {/* Locked Period Warning */}
+      {/* Locked Period Warning + Correction Mode toggle */}
       {viewMode === 'cutoff' && selectedPeriod?.isLocked && (
-        <div className="flex items-center gap-2 p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-800">
-          <Lock className="h-4 w-4" />
-          <span className="text-sm">This cutoff period is locked. Attendance records cannot be edited.</span>
+        <div className={`flex flex-col sm:flex-row sm:items-center gap-2 p-3 border rounded-lg ${correctionMode ? 'bg-orange-50 border-orange-300 text-orange-800' : 'bg-amber-50 border-amber-200 text-amber-800'}`}>
+          <div className="flex items-center gap-2 flex-1">
+            {correctionMode ? <Edit className="h-4 w-4" /> : <Lock className="h-4 w-4" />}
+            <span className="text-sm">
+              {correctionMode
+                ? "Correction Mode is ON. You can edit attendance even though this period is locked. After editing, go to Payroll and click Regenerate/Refresh to apply the correction."
+                : "This cutoff period is locked. Enable Correction Mode to edit attendance for a payroll correction."}
+            </span>
+          </div>
+          {isAdmin && selectedPeriod.status !== 'PAID' && (
+            <Button
+              variant={correctionMode ? "default" : "outline"}
+              size="sm"
+              className={correctionMode ? "bg-orange-600 hover:bg-orange-700 text-white" : "border-amber-400 text-amber-800 hover:bg-amber-100"}
+              onClick={() => setCorrectionMode(!correctionMode)}
+            >
+              <Edit className="h-4 w-4 mr-2" />
+              {correctionMode ? "Disable Correction Mode" : "Enable Correction Mode"}
+            </Button>
+          )}
         </div>
       )}
 
@@ -1056,7 +1079,7 @@ export default function AttendancePage() {
                             </td>
                             {daysInRange.map((date) => {
                               const attendance = getAttendanceForDay(employee.id, date);
-                              const canEdit = isAdmin && (!selectedPeriod?.isLocked || viewMode === 'monthly');
+                              const canEdit = isAdmin && (!selectedPeriod?.isLocked || viewMode === 'monthly' || correctionMode);
                               return (
                                 <td
                                   key={date.toISOString()}
